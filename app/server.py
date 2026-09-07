@@ -256,6 +256,59 @@ def _is_priority_media_type(media_type: str) -> bool:
     return bool(mod is not None and mod.MODULE_PRIORITY < 10)
 
 
+ROTATION_WAKE_MARGIN_S = 15     # so viele Sekunden nach der Slot-Grenze soll das Gerät das neue Bild holen
+DEFAULT_DEVICE_CYCLE_S = 40     # Aufwachen → WLAN → Download → Anzeige → ACK, solange keine Messung da ist
+MIN_WAKE_S = 10
+
+
+def _device_cycle_seconds() -> int:
+    """Dauer eines Gerätezyklus aus der letzten Rückmeldung (cycle_ms), sonst der Standardwert."""
+    try:
+        seconds = int(_last_ack.get("cycle_ms")) / 1000.0
+    except (TypeError, ValueError):
+        return DEFAULT_DEVICE_CYCLE_S
+    return int(min(180, max(5, round(seconds))))
+
+
+def _aligned_rotation_wake(rotation_seconds: int, now: float | None = None, cycle_seconds: int | None = None) -> tuple[int, float]:
+    """
+    Schlafzeit, mit der das Gerät ROTATION_WAKE_MARGIN_S nach der nächsten Slot-Grenze
+    das Bild holt – statt „Rotationstakt“ zu schlafen und mit jedem Zyklus um die eigene
+    Zyklusdauer zu driften (dann verpasst es Bilder oder holt das alte kurz vor dem Wechsel).
+    Gibt (Sekunden, Zeitstempel der Grenze) zurück.
+    """
+    now = time.time() if now is None else now
+    cycle = _device_cycle_seconds() if cycle_seconds is None else cycle_seconds
+    rotation = max(int(rotation_seconds), 1)
+    boundary = (int(now // rotation) + 1) * rotation
+    seconds = boundary + ROTATION_WAKE_MARGIN_S - cycle - now
+    if seconds < MIN_WAKE_S:
+        # Die nächste Grenze ist mit dem laufenden Zyklus nicht mehr zu schaffen – die übernächste
+        boundary += rotation
+        seconds += rotation
+    return int(round(seconds)), float(boundary)
+
+
+def _rotation_wake() -> tuple[int, str]:
+    """Wake-Intervall eines Idle-Bilds: Slot-Grenze der Rotation, Zeitplan-Grenzen gehen vor."""
+    from app.config import local_tz
+    _, rotation = _get_effective_idle_modules(get_settings_values())
+    seconds, boundary = _aligned_rotation_wake(rotation)
+    at = datetime.fromtimestamp(boundary, local_tz()).strftime("%H:%M")
+    state = _get_schedule_state()
+    window = state.get("window")
+    if window is not None:
+        until = int(state.get("seconds_until_end", 0) or 0)
+        if 0 < until < seconds:
+            return max(MIN_WAKE_S, until), f"Zeitfenster „{window.name}“ endet um {window.end_text} – pünktlicher Wechsel"
+        return seconds, f"Zeitfenster „{window.name}“ – nächstes Bild um {at}"
+    upcoming = state.get("next")
+    until = int(state.get("seconds_until_change", 0) or 0)
+    if upcoming is not None and 0 < until < seconds:
+        return max(MIN_WAKE_S, until), f"Zeitfenster „{upcoming.name}“ beginnt um {upcoming.start_text} – pünktlicher Wechsel"
+    return seconds, f"Idle-Rotation – nächstes Bild um {at}"
+
+
 def _suggest_next_wake(state: str, media_type: str) -> tuple[int, str]:
     cfg = get_cfg()
     if media_type == "plex":
@@ -288,7 +341,7 @@ def _suggest_next_wake(state: str, media_type: str) -> tuple[int, str]:
         if mod.MODULE_PRIORITY < 10:
             return cfg.refresh_interval, f"{mod.MODULE_NAME} aktiv – Refresh-Intervall"
 
-    return _apply_schedule_interval(cfg.idle_module_rotation_seconds, "Idle-Modul – Standard-Rotation")
+    return _rotation_wake()
 
 
 # ---------------------------------------------------------------------------
@@ -573,13 +626,14 @@ def render_image() -> str | None:
     return render_if_changed(None)   # None != irgendein str → immer neu
 
 
-def request_render(wait_seconds: float = 0.0) -> bool:
+def request_render(wait_seconds: float = 0.0, reason: str = "") -> bool:
     """
     Fordert vom Worker einen erzwungenen Render an, ohne selbst zu rendern.
     Mit wait_seconds > 0 wird auf den Abschluss gewartet. Gibt True zurück,
     wenn der Render innerhalb der Wartezeit abgeschlossen wurde.
     """
     global _force_render_requested
+    log.info(f"Render angefordert: {reason or 'ohne Angabe'}")
     with _render_cond:
         _force_render_requested = True
         # Läuft gerade ein Render, enthält er unsere Anforderung noch nicht:
@@ -610,7 +664,13 @@ def _get_background_poll_seconds() -> int:
     # Zeitplan: an der nächsten Fenstergrenze (Ende oder Beginn) pünktlich neu rendern
     until = int(_get_schedule_state().get("seconds_until_change", 0) or 0)
     if until > 0:
-        return min(base_poll, max(1, until))
+        base_poll = min(base_poll, max(1, until))
+    # Idle-Rotation: das nächste Bild entsteht direkt an der Slot-Grenze, nicht erst
+    # beim nächsten Poll – das Gerät holt es ROTATION_WAKE_MARGIN_S danach ab
+    enabled_idle, rotation = _get_effective_idle_modules(env)
+    if enabled_idle and rotation > 1:
+        until_slot = rotation - (time.time() % rotation)
+        base_poll = min(base_poll, max(1, int(until_slot) + 1))
     return base_poll
 
 
@@ -1292,7 +1352,7 @@ def api_settings_import():
 
 @app.route("/refresh", methods=["GET", "POST"])
 def refresh():
-    completed = request_render(wait_seconds=20)
+    completed = request_render(wait_seconds=20, reason="/refresh")
     return jsonify({
         "ok":      True,
         "message": "refreshed" if completed else "queued",
@@ -1339,7 +1399,7 @@ def webhook():
     try:
         payload = request.form.get("payload")
         log.info(f"Webhook: {(payload or '')[:300] or '(kein Payload)'}")
-        request_render()
+        request_render(reason="Webhook")
         return jsonify({"ok": True, "queued": True})
     except Exception as exc:
         log.error(f"webhook: {exc}", exc_info=True)
@@ -1360,7 +1420,7 @@ def _apply_updates_and_render(updates: dict[str, str], wait_seconds: float = 0.0
     with _render_lock:
         apply_runtime_config({**get_settings_values(), **updates})
     log_event("settings", "Einstellungen gespeichert")
-    request_render(wait_seconds=wait_seconds)
+    request_render(wait_seconds=wait_seconds, reason="Einstellungen gespeichert")
 
 
 def _display_state_payload() -> dict:

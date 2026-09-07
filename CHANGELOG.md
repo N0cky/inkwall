@@ -55,6 +55,7 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Time zones in Docker: hourly weather labels, "Aktualisiert" stamps and weekday names (`Mi` instead of `Wed`) use the configured zone and German names
 - A failed render is retried on the next tick instead of leaving the old image up
 - Module rescan no longer wipes packages it did not load itself
+- Rotation drifted on the device: it slept the full rotation interval after a ~40 s cycle, so its period was longer than the server's slot, it skipped an image every few cycles and sometimes fetched the old one seconds before the switch; the server now renders exactly at the slot boundary and tells the device to sleep so that it fetches 15 s after the next boundary (using the cycle time from its last acknowledgement), one image per slot; forced renders (settings saved, `/refresh`, webhook) are named in the log
 - The save bar on the Anzeige page did not stick to the window: `overflow: hidden` on the page shell (there for the rounded corners) turned it into the scroll container; it is `overflow: clip` now
 - Anzeige page: once the render history held more thumbnails than fit in the strip, the left column grew to the full strip width and the live image overflowed the page; the column grid now clamps its cards (`minmax(0, 1fr)`), the strip scrolls as intended
 
