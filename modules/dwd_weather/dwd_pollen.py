@@ -5,9 +5,11 @@ Endpoint: https://opendata.dwd.de/climate_environment/health/alerts/s31fg.json
 Aktualisierung durch DWD: einmal täglich (~11 Uhr).
 Cache-TTL: 6 Stunden (weit über dem DWD-Updatezyklus, spart Requests).
 
-Region-Konfiguration: nur die region_id als Zahl, z. B. "100" für Hessen.
-Die API enthält pro region_id ggf. mehrere Einträge (Teilregionen); dann wird
-der erste passende Eintrag genutzt.
+Region-Konfiguration "region_id:partregion_id", z. B. "90:92" für Hessen –
+Rhein-Main. Länder ohne Teilregionen haben partregion_id -1 ("20:-1").
+"90:-1" bei einem Land mit Teilregionen heißt: das ganze Land, je Allergen
+und Tag der höchste Wert aller Teilregionen. Bis 0.2 standen die Teilregionen
+als "92:-1" in der Liste – solche Werte werden weiter als Teilregion gelesen.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import get_cfg, get_csv_setting, get_setting
 from app.logger import get_logger
-from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS
+from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 
 log = get_logger(__name__)
 
@@ -65,7 +67,8 @@ ALLERGEN_LABELS: dict[str, str] = {
 # Cache (Thread-sicher)
 # ---------------------------------------------------------------------------
 
-_POLLEN_CACHE: dict = {"fetched_at": 0.0, "last_attempt_at": 0.0, "region_key": "", "data": None, "next_refresh_at": 0.0}
+_POLLEN_CACHE: dict = {"fetched_at": 0.0, "last_attempt_at": 0.0, "region_key": "", "data": None, "next_refresh_at": 0.0,
+                       "not_found_at": 0.0}
 _POLLEN_LOCK  = threading.Lock()
 
 
@@ -83,12 +86,35 @@ def parse_load(raw: str | None) -> float | None:
     return _LOAD_MAP.get(s)
 
 
-def _find_region(content: list, region_id: int) -> dict | None:
-    """Findet den ersten API-Eintrag mit der gegebenen region_id."""
-    for entry in content:
-        if entry.get("region_id") == region_id:
-            return entry
-    return None
+def parse_region_key(key: str) -> tuple[int, int] | None:
+    """'90:92' → (90, 92), '20:-1' oder '20' → (20, -1). None bei Unsinn."""
+    parts = str(key or "").strip().split(":")
+    try:
+        region_id = int(parts[0])
+        partregion_id = int(parts[1]) if len(parts) > 1 and parts[1].strip() else -1
+    except (ValueError, IndexError):
+        return None
+    return region_id, partregion_id
+
+
+def _select_entries(content: list, region_id: int, partregion_id: int) -> list[dict]:
+    """
+    API-Einträge zur Auswahl: die Teilregion, sonst alle Einträge des Landes.
+    Alte Werte bis 0.2 ("92:-1" für Rhein-Main) meinten die Teilregion 92.
+    """
+    entries = [e for e in content if isinstance(e, dict)]
+    if partregion_id != -1:
+        return [e for e in entries if e.get("region_id") == region_id and e.get("partregion_id") == partregion_id]
+    whole = [e for e in entries if e.get("region_id") == region_id]
+    if whole:
+        return whole
+    return [e for e in entries if e.get("partregion_id") == region_id]
+
+
+def _find_region(content: list, region_id: int, partregion_id: int = -1) -> dict | None:
+    """Erster passender API-Eintrag (für Aufrufer, die nur einen brauchen)."""
+    entries = _select_entries(content, region_id, partregion_id)
+    return entries[0] if entries else None
 
 
 def _get_local_timezone() -> ZoneInfo:
@@ -179,12 +205,11 @@ def fetch_dwd_pollen(force_refresh: bool = False) -> dict | None:
     if not selected_allergens:
         return None                          # nichts ausgewählt → kein Strip
 
-    # Region-ID parsen – nur die erste Zahl zählt (z. B. "100" oder "100:-1")
-    try:
-        region_id = int(region_key.split(":")[0])
-    except (ValueError, AttributeError):
+    parsed = parse_region_key(region_key)
+    if parsed is None:
         log.warning(f"Ungültige Region-Konfiguration: {region_key!r}")
         return None
+    region_id, partregion_id = parsed
 
     with _POLLEN_LOCK:
         now = time.time()
@@ -199,11 +224,17 @@ def fetch_dwd_pollen(force_refresh: bool = False) -> dict | None:
             # daher nochmal filtern bevor wir zurückgeben.
             return _filter_cached(cached["data"], selected_allergens)
 
-        # Backoff nach Fehlschlag oder "Region nicht gefunden"
+        # Backoff nach Fehlschlag oder "Region nicht gefunden" (ein Einstellungsfehler:
+        # erst nach der Cache-Zeit wieder fragen, nicht alle 5 min den ganzen Feed laden)
         if (not force_refresh
                 and cached["region_key"] == region_key
-                and now - cached["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS):
+                and (now - cached["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS
+                     or now - cached.get("not_found_at", 0.0) < DEFAULT_POLLEN_CACHE_SECONDS)):
             if cached.get("data"):
+                return _filter_cached(cached["data"], selected_allergens)
+            return None
+        if not force_refresh and not network_allowed():
+            if cached.get("data") and cached["region_key"] == region_key:
                 return _filter_cached(cached["data"], selected_allergens)
             return None
         cached["last_attempt_at"] = now
@@ -220,12 +251,16 @@ def fetch_dwd_pollen(force_refresh: bool = False) -> dict | None:
             return None
 
         content = js.get("content", [])
-        entry = _find_region(content, region_id)
-        if entry is None:
-            log.warning(f"region_id={region_id} nicht in der DWD-API gefunden. "
-                  f"Verfügbare IDs: {sorted({e.get('region_id') for e in content})} – "
-                  f"nächster Versuch in {FETCH_RETRY_BACKOFF_SECONDS}s")
+        entries = _select_entries(content, region_id, partregion_id)
+        if not entries:
+            cached["not_found_at"] = now
+            cached["data"] = None
+            available = sorted({f"{e.get('region_id')}:{e.get('partregion_id')}" for e in content if isinstance(e, dict)})
+            log.warning(f"Pollen-Region {region_key} nicht in der DWD-API gefunden. Verfügbar: {', '.join(available)} – "
+                        f"nächster Versuch in {DEFAULT_POLLEN_CACHE_SECONDS // 3600} h")
             return None
+        cached["not_found_at"] = 0.0
+        entry = entries[0]
 
         last_update_dt = _parse_pollen_update_timestamp(js.get("last_update"))
         next_update_dt = _parse_pollen_update_timestamp(js.get("next_update"))
@@ -234,8 +269,9 @@ def fetch_dwd_pollen(force_refresh: bool = False) -> dict | None:
         # Alle Allergen-Daten cachen (ohne Filterung → gilt für alle Allergen-Kombis)
         full_summary = {
             "region_name":     entry.get("region_name", ""),
-            "partregion_name": entry.get("partregion_name", ""),
-            "allergens_all":   _extract_all_allergens(entry, day_shift),
+            # Mehrere Teilregionen (ganzes Land): kein Teilregionsname, Werte sind die Höchstwerte
+            "partregion_name": entry.get("partregion_name", "") if len(entries) == 1 else "",
+            "allergens_all":   _extract_all_allergens(entries, day_shift),
             "last_update":     js.get("last_update"),
             "next_update":     js.get("next_update"),
             "day_shift":       day_shift,
@@ -247,19 +283,30 @@ def fetch_dwd_pollen(force_refresh: bool = False) -> dict | None:
         return _filter_cached(full_summary, selected_allergens)
 
 
-def _extract_all_allergens(entry: dict, day_shift: int = 0) -> dict[str, dict]:
-    """Extrahiert alle Allergen-Daten aus einem API-Eintrag (ungefiltert)."""
-    pollen_raw = entry.get("Pollen", {})
+def _extract_all_allergens(entries: dict | list[dict], day_shift: int = 0) -> dict[str, dict]:
+    """
+    Alle Allergen-Daten (ungefiltert). Bei mehreren Einträgen (ganzes Land mit
+    Teilregionen) je Allergen und Tag der höchste Wert – wer „Hessen“ wählt,
+    soll die stärkere Belastung sehen, nicht zufällig die erste Teilregion.
+    """
+    if isinstance(entries, dict):
+        entries = [entries]
     result: dict[str, dict] = {}
     for allergen in ALL_ALLERGENS:
-        raw = pollen_raw.get(allergen)
-        if raw is None:
-            continue
-        result[allergen] = _shift_pollen_days({
-            "today":       parse_load(raw.get("today")),
-            "tomorrow":    parse_load(raw.get("tomorrow")),
-            "dayafter_to": parse_load(raw.get("dayafter_to")),
-        }, day_shift)
+        days: dict[str, float | None] = {}
+        found = False
+        for entry in entries:
+            raw = (entry.get("Pollen") or {}).get(allergen)
+            if raw is None:
+                continue
+            found = True
+            for day in ("today", "tomorrow", "dayafter_to"):
+                value = parse_load(raw.get(day))
+                if value is not None and (days.get(day) is None or value > days[day]):
+                    days[day] = value
+                days.setdefault(day, None)
+        if found:
+            result[allergen] = _shift_pollen_days(days, day_shift)
     return result
 
 
@@ -287,6 +334,8 @@ def should_refresh_dwd_pollen() -> bool:
         now = time.time()
         region_key = get_setting("DWD_POLLEN_REGION", "").strip()
         if cached["region_key"] == region_key and now - cached["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
+            return False
+        if cached["region_key"] == region_key and now - cached.get("not_found_at", 0.0) < DEFAULT_POLLEN_CACHE_SECONDS:
             return False
         if cached["data"] is None:
             return True

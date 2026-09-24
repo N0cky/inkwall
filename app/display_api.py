@@ -23,6 +23,7 @@ from app.config import (
     get_settings_values,
     parse_dashboard_tiles,
 )
+from app.http_client import cache_only
 from app.logger import get_logger
 import app.module_registry as _registry
 
@@ -66,7 +67,11 @@ def _safe(callable_, default):
 
 
 def _module_entry(mod, env: dict[str, str], active_module_id: str, heights: dict[str, int]) -> dict[str, Any]:
-    status = _safe(lambda: mod.describe_status(env), {"state": "ready", "reason": ""})
+    # Nur aus dem Cache: die Anzeige-Seite fragt alle 30 s, /metrics bei jedem
+    # Scrape – das darf keine Quelle neu laden, schon gar keine abgeschaltete
+    with cache_only():
+        status = _safe(lambda: mod.describe_status(env), {"state": "ready", "reason": ""})
+        summary = _safe(lambda: mod.summarize(env), "")
     return {
         "id":             mod.MODULE_ID,
         "name":           mod.MODULE_NAME,
@@ -74,7 +79,7 @@ def _module_entry(mod, env: dict[str, str], active_module_id: str, heights: dict
         "kind":           "live" if mod.MODULE_PRIORITY < 10 else "content",
         "enabled":        _module_enabled(mod, env),
         "status":         {"state": status.get("state", "ready"), "reason": status.get("reason", "")},
-        "summary":        _safe(lambda: mod.summarize(env), ""),
+        "summary":        summary,
         "tile_supported": mod.supports_tile(),
         "height":         heights.get(mod.MODULE_ID),
         "active_now":     mod.MODULE_ID == active_module_id,

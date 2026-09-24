@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 
 from app.config import DATA_DIR, get_int_setting, get_setting, local_tz, now_local
-from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS
+from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -30,6 +30,7 @@ DEFAULT_CACHE_SECONDS = 120
 DEFAULT_DURATION_MINUTES = 60
 DEFAULT_MAX_PER_STOP = 8
 MAX_STOPS = 3
+NOT_FOUND_BACKOFF_SECONDS = 3600    # Name ohne Treffer: ein Tippfehler wird nicht alle 5 min neu gesucht
 USER_AGENT = "Inkwall/0.2 (+https://github.com/N0cky/inkwall)"
 
 PRODUCTS = (
@@ -49,7 +50,8 @@ ALL_PRODUCT_KEYS = tuple(key for key, _ in PRODUCTS)
 STOPS_FILE = DATA_DIR / "departures_stops.json"
 
 _CACHE: dict[str, dict] = {}       # stop_id → {"fetched_at", "last_attempt_at", "departures", "error", "name"}
-_RESOLVED: dict[str, dict] = {}    # query (lower) → {"id", "name"}
+_RESOLVED: dict[str, dict] = {}    # "api-basis|query (lower)" → {"id", "name"}; ältere Einträge nur "query"
+_RESOLVE_FAILED: dict[str, tuple[float, float]] = {}   # Schlüssel wie _RESOLVED → (Zeitpunkt, Wartezeit)
 _LOCK = threading.Lock()
 _DISK_LOADED = False
 
@@ -135,29 +137,53 @@ def search_locations(query: str, results: int = 5) -> list[dict]:
     return [f for f in found if f["id"]]
 
 
+def _resolve_key(query: str) -> str:
+    """Je Schnittstelle gemerkt: die IDs von DB und VBB sind nicht dieselben."""
+    return f"{api_base_url()}|{query.strip().lower()}"
+
+
 def resolve_stop(query: str, force: bool = False) -> dict | None:
-    """Nummer → direkt; Name → erster Treffer von /locations (gemerkt). None, wenn nichts gefunden."""
+    """
+    Nummer → direkt; Name → erster Treffer von /locations (gemerkt). None, wenn
+    nichts gefunden. Fehlschläge werden gemerkt (Netzfehler 5 min, kein Treffer
+    1 h), damit nicht jeder Render, jede Zusammenfassung und jeder Scrape die
+    Schnittstelle erneut fragt. Ist sie nicht erreichbar, gilt ein alter Eintrag
+    ohne Schnittstelle im Schlüssel (von vor 0.3) als Notlösung.
+    """
     query = (query or "").strip()
     if not query:
         return None
     if query.isdigit():
         return {"id": query, "name": ""}
-    key = query.lower()
+    key = _resolve_key(query)
+    now = time.time()
     with _LOCK:
         _load_disk()
         if not force and key in _RESOLVED:
             return dict(_RESOLVED[key])
+        legacy = _RESOLVED.get(query.lower())
+        fallback = dict(legacy) if legacy else None
+        failed = _RESOLVE_FAILED.get(key)
+        if not force and failed and now - failed[0] < failed[1]:
+            return fallback
+    if not force and not network_allowed():
+        return fallback
     try:
         found = search_locations(query, results=3)
     except Exception as exc:
-        log.warning(f"Abfahrten: Haltestelle „{query}“ nicht auflösbar: {exc}")
-        return None
+        log.warning(f"Abfahrten: Haltestelle „{query}“ nicht auflösbar: {exc} – nächster Versuch in {FETCH_RETRY_BACKOFF_SECONDS}s")
+        with _LOCK:
+            _RESOLVE_FAILED[key] = (now, FETCH_RETRY_BACKOFF_SECONDS)
+        return fallback
     if not found:
+        with _LOCK:
+            _RESOLVE_FAILED[key] = (now, NOT_FOUND_BACKOFF_SECONDS)
         return None
     with _LOCK:
+        _RESOLVE_FAILED.pop(key, None)
         _RESOLVED[key] = {"id": found[0]["id"], "name": found[0]["name"]}
         _save_disk()
-    return dict(_RESOLVED[key])
+        return dict(_RESOLVED[key])
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +254,10 @@ def fetch_stop_departures(stop_id: str, duration_minutes: int, force_refresh: bo
                 return dict(entry)
             if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
                 return dict(entry)
+        if not network_allowed():
+            if entry is not None:
+                return dict(entry)
+            return {"fetched_at": 0.0, "last_attempt_at": 0.0, "departures": None, "error": "", "name": ""}
         _CACHE[stop_id] = {
             "fetched_at": entry["fetched_at"] if entry else 0.0,
             "last_attempt_at": now,
@@ -264,10 +294,22 @@ def fetch_stop_departures(stop_id: str, duration_minutes: int, force_refresh: bo
 
 
 def should_refresh_departures() -> bool:
+    """Neu rendern, wenn die Abfahrten einer eingetragenen Haltestelle abgelaufen sind (entfernte zählen nicht)."""
     cache_seconds = get_int_setting("DEPARTURES_CACHE_SECONDS", DEFAULT_CACHE_SECONDS, 30, 3600)
     now = time.time()
     with _LOCK:
-        for entry in _CACHE.values():
+        _load_disk()
+        ids = set()
+        for _, query in parse_stops(get_setting("DEPARTURES_STOPS", "")):
+            if query.isdigit():
+                ids.add(query)
+            else:
+                known = _RESOLVED.get(_resolve_key(query)) or _RESOLVED.get(query.strip().lower())
+                if known:
+                    ids.add(known["id"])
+        for stop_id, entry in _CACHE.items():
+            if stop_id not in ids:
+                continue
             if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
                 continue
             if now - entry["fetched_at"] >= cache_seconds:
@@ -280,6 +322,7 @@ def clear_cache() -> None:
     with _LOCK:
         _CACHE.clear()
         _RESOLVED.clear()
+        _RESOLVE_FAILED.clear()
         _DISK_LOADED = False
 
 
@@ -357,6 +400,12 @@ def fetch_departures_content(force_refresh: bool = False) -> dict | None:
             "label": label, "id": target["id"], "name": result.get("name") or target.get("name") or "",
             "departures": result["departures"], "error": result.get("error", ""), "fetched_at": result.get("fetched_at", 0.0),
         })
+    if network_allowed():
+        # Abfahrten entfernter Haltestellen vergessen
+        used = {s["id"] for s in resolved_stops if s["id"]}
+        with _LOCK:
+            for stop_id in [k for k in _CACHE if k not in used]:
+                del _CACHE[stop_id]
     if not any_loaded:
         return None
     return build_departures_content(resolved_stops, now_local(), products, walk, max_per_stop)

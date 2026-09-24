@@ -300,7 +300,7 @@ When settings are changed through the web UI, the application writes them back t
 | `/current.bmp` | GET | Current image as BMP (only when `OUTPUT_FORMAT=bmp`) |
 | `/current.epd` | GET | Current image in the compact 4-bpp display format, 960 KB instead of 5.8 MB (only when `OUTPUT_FORMAT=bmp`, see `app/epd_format.py`) |
 | `/meta.json` | GET | Hash, format, status, suggested sleep interval, compact image URL and hosted firmware version |
-| `/health` | GET | Health check for Docker and monitoring |
+| `/health` | GET | Health check for Docker and monitoring; `503` when the render worker has died or has been silent for too long |
 | `/hash` | GET | MD5 hash of the current image (plain text) |
 | `/ack` | POST | Acknowledgement from the display client: result, health data (RSSI, firmware, timings) and the device log lines |
 | `/firmware.json`, `/firmware.bin` | GET | Firmware hosted for over-the-air updates (`x-MD5` header on the binary) |

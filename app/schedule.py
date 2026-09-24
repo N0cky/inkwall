@@ -321,9 +321,22 @@ def _window_active_at(w: Window, now: datetime) -> bool:
     return False
 
 
+def _after(dt: datetime, now: datetime) -> datetime | None:
+    """
+    dt, wenn es wirklich nach now liegt. Verglichen wird über den Zeitstempel:
+    datetimes mit derselben ZoneInfo vergleicht Python nach Wanduhr, das geht
+    in den Nächten der Zeitumstellung eine Stunde daneben. In der doppelten
+    Stunde (Herbst) zählt notfalls das zweite Vorkommen der Uhrzeit.
+    """
+    if dt.timestamp() > now.timestamp():
+        return dt
+    later = dt.replace(fold=1)
+    return later if later.timestamp() > now.timestamp() else None
+
+
 def _end_datetime(w: Window, now: datetime) -> datetime:
     """Ende des gerade aktiven Fensters als Zeitpunkt."""
-    base = now.replace(second=0, microsecond=0)
+    base = now.replace(second=0, microsecond=0, fold=0)
     end = base.replace(hour=w.end // 60, minute=w.end % 60)
     if w.start >= w.end and (now.hour * 60 + now.minute) >= w.start:
         end += timedelta(days=1)
@@ -332,13 +345,13 @@ def _end_datetime(w: Window, now: datetime) -> datetime:
 
 def _next_start(w: Window, now: datetime) -> datetime | None:
     """Nächster Beginn des Fensters ab jetzt (bis zu 8 Tage voraus)."""
-    base = now.replace(second=0, microsecond=0)
+    base = now.replace(second=0, microsecond=0, fold=0)
     for offset in range(0, 8):
         day = base + timedelta(days=offset)
         if day.weekday() not in w.days:
             continue
-        start = day.replace(hour=w.start // 60, minute=w.start % 60)
-        if start > now:
+        start = _after(day.replace(hour=w.start // 60, minute=w.start % 60), now)
+        if start is not None:
             return start
     return None
 
@@ -352,7 +365,9 @@ def active_window(windows: list[Window], now: datetime) -> tuple[Window | None, 
     active = next((w for w in windows if _window_active_at(w, now)), None)
     candidates: list[tuple[datetime, Window | None]] = []
     if active is not None:
-        candidates.append((_end_datetime(active, now), None))
+        end = _after(_end_datetime(active, now), now)
+        if end is not None:
+            candidates.append((end, None))
     for w in windows:
         if w is active:
             continue
@@ -361,8 +376,10 @@ def active_window(windows: list[Window], now: datetime) -> tuple[Window | None, 
             candidates.append((start, w))
     if not candidates:
         return active, 0, None
-    when, upcoming = min(candidates, key=lambda c: c[0])
-    seconds = max(1, int((when - now).total_seconds()))
+    # Echte Sekunden (Zeitstempel), nicht die Differenz der Wanduhr – sonst weckt
+    # der Zeitplan in den Nächten der Zeitumstellung eine Stunde zu früh oder zu spät
+    when, upcoming = min(candidates, key=lambda c: c[0].timestamp())
+    seconds = max(1, int(when.timestamp() - now.timestamp()))
     return active, seconds, upcoming
 
 

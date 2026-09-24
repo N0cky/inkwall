@@ -119,6 +119,10 @@ def delete_firmware() -> None:
 
 DEVICE_STATE_PATH = DATA_DIR / "device_state.json"
 _test_banner_pending = False
+# Lesen-Ändern-Schreiben von device_state.json am Stück. Mehrere Schreiber
+# (ACK-Request, Benachrichtigungen im Worker, Panelreinigung) dürfen sich
+# nicht gegenseitig mit einem alten Stand überschreiben.
+_state_lock = threading.RLock()
 
 
 def load_device_state() -> dict:
@@ -132,9 +136,22 @@ def load_device_state() -> dict:
 def save_device_state(state: dict) -> None:
     with _lock:
         DEVICE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = DEVICE_STATE_PATH.with_suffix(".json.tmp")
+        tmp = DEVICE_STATE_PATH.with_suffix(f".json.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, DEVICE_STATE_PATH)
+
+
+def update_device_state(change) -> dict:
+    """
+    change(state) ändert den frisch gelesenen Zustand; gespeichert wird unter
+    der Sperre. So gehen keine Felder verloren, die ein anderer Schreiber
+    gerade gesetzt hat. Gibt den gespeicherten Zustand zurück.
+    """
+    with _state_lock:
+        state = load_device_state()
+        change(state)
+        save_device_state(state)
+        return state
 
 
 def last_clean_at() -> datetime | None:
@@ -146,9 +163,7 @@ def last_clean_at() -> datetime | None:
 
 
 def mark_cleaned(now: datetime) -> None:
-    state = load_device_state()
-    state["last_clean_at"] = now.isoformat()
-    save_device_state(state)
+    update_device_state(lambda state: state.__setitem__("last_clean_at", now.isoformat()))
 
 
 def clean_due(now: datetime, interval_days: int, hour: int) -> bool:

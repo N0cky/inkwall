@@ -23,7 +23,7 @@ import time
 from datetime import datetime
 
 from app.config import DATA_DIR, get_int_setting, get_setting, get_settings_values, now_local
-from app.http_client import FETCH_RETRY_BACKOFF_SECONDS, HTTP_SESSION
+from app.http_client import FETCH_RETRY_BACKOFF_SECONDS, HTTP_SESSION, network_allowed
 from app.logger import get_logger
 
 from . import history
@@ -59,6 +59,8 @@ STATIONS_FILE = DATA_DIR / "fuel_stations.json"
 
 _CACHE: dict = {"fetched_at": 0.0, "last_attempt_at": 0.0, "stations": None, "error": "", "key": ""}
 _DETAILS: dict[str, dict] = {}     # station id → {name, brand, street, place}
+_DETAIL_FAILED: dict[str, float] = {}   # station id → Zeitpunkt des letzten Fehlschlags
+DETAIL_RETRY_SECONDS = 3600        # eine unbekannte oder gerade nicht lieferbare Station nicht bei jedem Abruf erneut fragen
 _LOCK = threading.Lock()
 _DISK_LOADED = False
 
@@ -273,16 +275,24 @@ def station_detail(station_id: str, force: bool = False) -> dict | None:
         _load_disk()
         if not force and station_id in _DETAILS:
             return dict(_DETAILS[station_id])
+        failed_at = _DETAIL_FAILED.get(station_id)
+        if not force and failed_at and time.time() - failed_at < DETAIL_RETRY_SECONDS:
+            return None
+    if not force and not network_allowed():
+        return None
     try:
         payload = _get("detail.php", {"id": station_id})
         parsed = parse_station(payload.get("station") or {})
     except Exception as exc:
         log.warning(f"Tankpreise: Station {station_id} nicht abrufbar: {exc}")
-        return None
+        parsed = None
     if not parsed:
+        with _LOCK:
+            _DETAIL_FAILED[station_id] = time.time()
         return None
     detail = {k: parsed[k] for k in ("name", "full_name", "street", "place")}
     with _LOCK:
+        _DETAIL_FAILED.pop(station_id, None)
         _DETAILS[station_id] = detail
         _save_disk()
     return dict(detail)
@@ -327,6 +337,8 @@ def fetch_stations(force_refresh: bool = False) -> dict:
                 return {k: _CACHE[k] for k in ("stations", "error", "fetched_at")}
             if now - _CACHE["last_attempt_at"] < min(FETCH_RETRY_BACKOFF_SECONDS, seconds):
                 return {k: _CACHE[k] for k in ("stations", "error", "fetched_at")}
+        if not network_allowed():
+            return {k: _CACHE[k] for k in ("stations", "error", "fetched_at")}
         _CACHE["last_attempt_at"] = now
     try:
         fixed = fixed_stations()
@@ -348,6 +360,21 @@ def fetch_stations(force_refresh: bool = False) -> dict:
             _CACHE["error"] = message
     with _LOCK:
         return {k: _CACHE[k] for k in ("stations", "error", "fetched_at")}
+
+
+def remember_radius_result(stations: list[dict]) -> bool:
+    """
+    Ergebnis einer Umkreissuche, die schon gemacht wurde (Verbindung prüfen),
+    als aktuellen Stand übernehmen – statt dieselbe list.php-Abfrage gleich
+    nochmal zu schicken. Nur ohne feste Stationen, da gilt genau diese Abfrage.
+    """
+    if fixed_stations() or location() is None:
+        return False
+    now = time.time()
+    with _LOCK:
+        _CACHE.update({"fetched_at": now, "last_attempt_at": now, "stations": stations, "error": "", "key": settings_key()})
+    _record_history(stations, now_local())
+    return True
 
 
 def cheapest_per_fuel(stations: list[dict], fuels: tuple[str, ...] = FUEL_KEYS) -> dict[str, tuple[float, str]]:
@@ -386,6 +413,7 @@ def clear_cache() -> None:
     with _LOCK:
         _CACHE.update({"fetched_at": 0.0, "last_attempt_at": 0.0, "stations": None, "error": "", "key": ""})
         _DETAILS.clear()
+        _DETAIL_FAILED.clear()
         _DISK_LOADED = False
 
 

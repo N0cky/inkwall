@@ -21,11 +21,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app.config import CURRENT_IMAGE_PATH
-from app.device import load_device_state, save_device_state
+from app.config import CURRENT_IMAGE_PATH, WEEKDAYS_DE_LONG, local_tz
+from app.device import load_device_state, update_device_state
 from app.http_client import HTTP_SESSION
 from app.logger import get_logger
 
@@ -36,6 +37,10 @@ DEFAULT_AVATAR_URL = "https://raw.githubusercontent.com/N0cky/inkwall/main/logo.
 ERROR_STREAK = 3                      # so viele Fehlerzyklen in Folge, bis gemeldet wird
 SOURCE_STALE_HOURS = 6                # so lange darf eine Quelle aus dem Cache leben, bis gemeldet wird
 SNAPSHOT_MAX_EDGE = 900
+
+# on_ack (ACK) und on_cycle (Worker) lesen und schreiben dieselben Merker –
+# nacheinander, sonst meldet einer ein Ereignis, das der andere gerade abgehakt hat
+_NOTIFY_LOCK = threading.Lock()
 
 EVENT_OPTIONS = (
     ("offline",  "Ausfall und Entwarnung"),
@@ -136,6 +141,11 @@ def _format_minutes(seconds: int) -> str:
     if minutes >= 60:
         return f"{minutes // 60} h {minutes % 60} min" if minutes % 60 else f"{minutes // 60} h"
     return f"{minutes} min"
+
+
+def _local(dt: datetime) -> datetime:
+    """In die eingestellte Zeitzone – ohne Argument nähme astimezone die des Containers, meist UTC."""
+    return dt.astimezone(local_tz())
 
 
 def _parse_ts(value: str) -> datetime | None:
@@ -278,10 +288,12 @@ class Notifier:
 
     @staticmethod
     def _save(state: dict, markers: dict) -> None:
-        state["notify"] = markers
-        state.pop("offline_notified_at", None)
-        state.pop("offline_notified_sent", None)
-        save_device_state(state)
+        """Nur die Merker zurückschreiben – in den frisch gelesenen Zustand, andere Felder bleiben unberührt."""
+        def change(current: dict) -> None:
+            current["notify"] = markers
+            current.pop("offline_notified_at", None)
+            current.pop("offline_notified_sent", None)
+        update_device_state(change)
 
     def _send(self, note: Notification) -> bool:
         if not self.url:
@@ -302,6 +314,10 @@ class Notifier:
 
     # ── Rückmeldung ─────────────────────────────────────────────────────────
     def on_ack(self, ack: dict, previous: dict, now: datetime | None = None) -> list[str]:
+        with _NOTIFY_LOCK:
+            return self._on_ack(ack, previous, now)
+
+    def _on_ack(self, ack: dict, previous: dict, now: datetime | None) -> list[str]:
         now = now or datetime.now(timezone.utc)
         device = ack.get("device_id") or "Das Display"
         sent: list[str] = []
@@ -317,7 +333,7 @@ class Notifier:
             if "offline" in self.events:
                 gone = f" – war rund {_format_minutes(int((now - since).total_seconds()))} länger weg" if since else ""
                 note = Notification("online", f"{device} ist wieder da", f"{device} meldet sich wieder{gone}.",
-                                    fields=[("Zuletzt", f"{now.astimezone():%H:%M}")] + self._device_fields(ack),
+                                    fields=[("Zuletzt", f"{_local(now):%H:%M}")] + self._device_fields(ack),
                                     image_png=self._snapshot())
                 if self._send(note):
                     sent.append("online")
@@ -374,6 +390,10 @@ class Notifier:
         """
         if not self.url:
             return []
+        with _NOTIFY_LOCK:
+            return self._on_cycle(last_ack, now_local, stale_sources, current, weekly_stats)
+
+    def _on_cycle(self, last_ack: dict, now_local: datetime, stale_sources, current, weekly_stats) -> list[str]:
         now_utc = now_local.astimezone(timezone.utc) if now_local.tzinfo else now_local.replace(tzinfo=timezone.utc)
         sent: list[str] = []
         state, markers = self._markers()
@@ -388,7 +408,7 @@ class Notifier:
                 if age >= self.offline_minutes * 60:
                     note = Notification("offline", f"{device} ausgefallen",
                                         f"{device} hat sich seit {_format_minutes(age)} nicht gemeldet.",
-                                        fields=[("Zuletzt gemeldet", f"{ack_at.astimezone():%d.%m. %H:%M}")] + self._device_fields(last_ack),
+                                        fields=[("Zuletzt gemeldet", f"{_local(ack_at):%d.%m. %H:%M}")] + self._device_fields(last_ack),
                                         priority="high")
                     markers["offline_at"] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
                     markers["offline_sent"] = self._send(note)
@@ -406,9 +426,9 @@ class Notifier:
                 hours = (now_utc - since_utc).total_seconds() / 3600
                 if hours >= SOURCE_STALE_HOURS and module_id not in notified:
                     note = Notification("source_down", f"{name}: Quelle nicht erreichbar",
-                                        f"{name} zeigt seit {hours:.0f} h den gespeicherten Stand vom {since_utc.astimezone():%d.%m. %H:%M}. "
+                                        f"{name} zeigt seit {hours:.0f} h den gespeicherten Stand vom {_local(since_utc):%d.%m. %H:%M}. "
                                         "Das Display läuft weiter, die Daten werden aber nicht mehr aktualisiert.",
-                                        fields=[("Inhalt", name), ("Stand", f"{since_utc.astimezone():%d.%m. %H:%M}")])
+                                        fields=[("Inhalt", name), ("Stand", f"{_local(since_utc):%d.%m. %H:%M}")])
                     notified[module_id] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
                     markers["sources"] = notified
                     changed = True
@@ -432,11 +452,11 @@ class Notifier:
             fields = [("Inhalt", cur.get("module_name") or "–")]
             rendered = _parse_ts(str(cur.get("rendered_at", "")))
             if rendered:
-                fields.append(("Erzeugt", f"{rendered.astimezone():%H:%M}"))
+                fields.append(("Erzeugt", f"{_local(rendered):%H:%M}"))
             ack_at = _parse_ts(str(last_ack.get("ack_at", "")))
             if ack_at:
-                fields.append(("Gerät zuletzt", f"{ack_at.astimezone():%H:%M}"))
-            note = Notification("daily", f"Guten Morgen – das Display am {now_local:%A, %d.%m.}".replace("Monday", "Montag"),
+                fields.append(("Gerät zuletzt", f"{_local(ack_at):%H:%M}"))
+            note = Notification("daily", f"Guten Morgen – das Display am {WEEKDAYS_DE_LONG[now_local.weekday()]}, {now_local:%d.%m.}",
                                 "So sieht das Display gerade aus.", fields=fields, image_png=self._snapshot())
             if self._send(note):
                 sent.append("daily")

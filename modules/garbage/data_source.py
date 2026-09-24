@@ -26,7 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from app.config import DATA_DIR, WEEKDAYS_DE_LONG, get_int_setting, get_setting, now_local
-from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS
+from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -280,8 +280,13 @@ def fetch_ics_events(url: str, force_refresh: bool = False) -> list[dict] | None
         if entry is not None and not force_refresh:
             if entry["events"] is not None and now - entry["fetched_at"] < cache_seconds:
                 return list(entry["events"])
-            if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
+            # Fehlt der Jahreskalender (404), erst nach der Cache-Zeit wieder fragen –
+            # die Kommune stellt ihn nicht im Minutentakt online
+            backoff = cache_seconds if entry.get("missing") else FETCH_RETRY_BACKOFF_SECONDS
+            if now - entry["last_attempt_at"] < backoff:
                 return list(entry["events"]) if entry["events"] is not None else None
+        if not network_allowed():
+            return list(entry["events"]) if entry is not None and entry["events"] is not None else None
         _CACHE[url] = {
             "fetched_at": entry["fetched_at"] if entry else 0.0,
             "last_attempt_at": now,
@@ -326,17 +331,53 @@ def cache_info(url: str) -> dict:
 
 
 def should_refresh_garbage() -> bool:
+    """
+    Neu rendern, wenn der Stand einer gerade geladenen URL abgelaufen ist.
+    Nur die URLs aus den Einstellungen zählen (bei {year} das laufende und ggf.
+    das nächste Jahr): der Vorjahres-Kalender oder eine entfernte Adresse wird
+    nie mehr geladen und würde sonst ab dem Jahreswechsel jeden Durchlauf
+    einen Neu-Render (und im Dashboard einen Panel-Refresh) auslösen.
+    """
     cache_seconds = get_int_setting("GARBAGE_CACHE_SECONDS", DEFAULT_CACHE_SECONDS, 300, 7 * 86400)
     now = time.time()
+    urls = active_urls()
     with _LOCK:
-        if not _CACHE:
-            return False
-        for entry in _CACHE.values():
+        for url in urls:
+            entry = _CACHE.get(url)
+            # Nie geladen (fehlt, 404): dafür holt fetch_content selbst nach, ein Render bringt nichts
+            if entry is None or entry["events"] is None:
+                continue
             if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
                 continue
             if now - entry["fetched_at"] >= cache_seconds:
                 return True
     return False
+
+
+def active_urls(today: date | None = None) -> list[str]:
+    """Alle URLs, die gerade geladen werden: je Quelle eine, mit {year} je Jahr (laufendes, ab Mitte November auch das nächste)."""
+    today = today or now_local().date()
+    urls: list[str] = []
+    for _, url in parse_sources(get_setting("GARBAGE_ICS_URLS", "")):
+        if YEAR_PLACEHOLDER in url:
+            urls.extend(expand_year(url, y) for y in _years_to_load(today))
+        else:
+            urls.append(url)
+    return urls
+
+
+def prune_cache(keep: list[str]) -> None:
+    """Stände von URLs vergessen, die nicht mehr geladen werden (Vorjahr, entfernte Adresse) – auch auf Platte."""
+    wanted = set(keep)
+    with _LOCK:
+        _load_disk_cache()
+        stale = [url for url in _CACHE if url not in wanted]
+        if not stale:
+            return
+        for url in stale:
+            del _CACHE[url]
+        _save_disk_cache()
+    log.info(f"Müll-Cache: {len(stale)} nicht mehr genutzte Kalender entfernt")
 
 
 def clear_cache() -> None:
@@ -509,6 +550,9 @@ def fetch_garbage_content(force_refresh: bool = False) -> dict | None:
                 oldest_stale = info["fetched_at"] if oldest_stale is None else min(oldest_stale, info["fetched_at"])
             for ev in events:
                 all_events.append({**ev, "label": label})
+
+    if network_allowed():
+        prune_cache(active_urls(today))
 
     if not any_loaded and not missing_years:
         return None

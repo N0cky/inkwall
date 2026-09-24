@@ -49,6 +49,13 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Plex posters and Steam artwork are cached between renders; Steam profile resolution no longer caches failures forever
 - `/api/logs` reads newest-first and stops at the limit; log file level is INFO
 - Secrets never appear in the settings HTML (empty password fields keep the stored value) and are masked in every log line; settings values are quoted on write and no longer exported to the process environment
+- Pollen regions are stored as `region:partregion` (e.g. `90:92` for Hessen – Rhein-Main); a whole state (`90:-1`) now shows the highest value of all its sub-regions for every allergen and day instead of silently the first sub-region. Values saved by 0.2 (`92:-1`) keep meaning the sub-region, and a select field keeps a stored value that is no longer in its list instead of clearing it on the next save
+- `/health` answers `503` when the render worker has died or has been silent for too long (reported under `worker`), so the Docker health check finally notices a frozen display
+- The container no longer renders while Gunicorn starts: hash and state of the last image are read from disk, `/meta.json` is valid from the first request, and the worker renders right after the start (a slow first render used to exceed Gunicorn's start timeout)
+- Summaries on the Anzeige page and `/metrics` answer from the cache only (`app.http_client.cache_only()`): a page load or a Prometheus scrape no longer refetches sources, and switched-off contents (e.g. Tankpreise) are no longer polled
+- Theme previews no longer take the render lock and no longer swap the global configuration (the override lives in the request's thread); saving settings no longer waits for a running render, which keeps working with the configuration it started with
+- Notifications of an acknowledgement are sent in the background, the device no longer waits for a Discord upload
+- HTTP: read timeouts are not retried, `Retry-After` is ignored (urllib3 slept as long as the server asked, under the render lock) and connecting gives up after 6 s
 
 ### Fixed
 
@@ -58,6 +65,16 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Rotation drifted on the device: it slept the full rotation interval after a ~40 s cycle, so its period was longer than the server's slot, it skipped an image every few cycles and sometimes fetched the old one seconds before the switch; the server now renders exactly at the slot boundary and tells the device to sleep so that it fetches 15 s after the next boundary (using the cycle time from its last acknowledgement), one image per slot; forced renders (settings saved, `/refresh`, webhook) are named in the log
 - The save bar on the Anzeige page did not stick to the window: `overflow: hidden` on the page shell (there for the rounded corners) turned it into the scroll container; it is `overflow: clip` now
 - Anzeige page: once the render history held more thumbnails than fit in the strip, the left column grew to the full strip width and the live image overflowed the page; the column grid now clamps its cards (`minmax(0, 1fr)`), the strip scrolls as intended
+- Schedule: on the nights the clocks change (next: 25 October) the wake-up at a window border was one hour early or late – the seconds are now computed from timestamps, not from the wall clock
+- Müllabfuhr and Kalender: a calendar that is no longer loaded (last year's `{year}` URL after New Year, a removed address) made every worker cycle re-render – in the dashboard a full panel refresh on every wake. Only configured sources count now, and stale entries are removed from memory and disk (including the private ICS text of removed calendars). A missing year calendar (404) is asked again after the cache time instead of every five minutes
+- Pollen: the sub-regions (e.g. Hessen – Rhein-Main) were never found, the strip stayed empty and the whole DWD feed was downloaded every five minutes; a region that does not exist is asked again after six hours
+- One content raising in `is_enabled`, `get_state_key` or `should_refresh` stopped every render, and an error while computing the poll interval ended the render worker for good; both are caught and logged now
+- Settings: two saves at the same moment could lose one of the changes (and shared one temp file); writing and applying are serialised now
+- `device_state.json`: a notification being sent could overwrite fields written meanwhile (last acknowledgement, panel cleaning – the panel was then cleaned twice); only the notification markers are written back now
+- Notification times were in the container's time zone (usually UTC), the morning picture had English weekdays except Monday
+- The offline banner test clicked during a running device cycle was dropped by that cycle's acknowledgement
+- Abfahrten: stop names that cannot be resolved (typo, API down) are no longer searched on every render, summary and scrape; resolved stops are remembered per API, so switching from DB to VBB resolves them again
+- Tankpreise: "Verbindung prüfen" sent the same `list.php` request twice; stations without details are asked again after an hour instead of every five minutes
 
 ## [0.1.0] - 2026-04-20
 

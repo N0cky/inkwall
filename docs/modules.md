@@ -317,6 +317,10 @@ einen Status-Chip, auf der Inhalte-Seite eine Zusammenfassung und einen Knopf "P
   Standard: aus `get_health_status()` abgeleitet (`configured`, `ok`).
 - `summarize(env)` → ein Satz fuer die eingeklappte Karte ("Giessen · UV Frankfurt").
   Standard: die Werte aus `get_runtime_summary()`.
+- `describe_status` und `summarize` laufen innerhalb von `app.http_client.cache_only()`: die
+  Anzeige-Seite fragt sie alle 30 s, `/metrics` bei jedem Scrape, auch fuer abgeschaltete Inhalte.
+  Eine Datenquelle, die dafuer `fetch_*` aufruft, prueft vor dem Abruf `network_allowed()` und
+  antwortet sonst mit dem, was sie schon hat (oder `None`) – ohne einen Fehlversuch zu vermerken.
 - `probe(env)` → `{"ok": bool, "message": str, "details": [str, ...]}`, ruft die Quelle einmal ab.
   Standard: `fetch_content()` und "Daten vorhanden" / "keine Daten". `details` ist optional
   und erscheint als Kasten unter dem Pruef-Ergebnis; Zeilen mit Doppelpunkt am Ende werden

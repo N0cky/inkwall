@@ -20,9 +20,14 @@ window.fields = (function () {
         var attrs = ' data-field="' + esc(f.name) + '"';
         switch (f.type) {
             case 'select':
-                html = '<select id="' + id + '"' + attrs + '>' + f.options.map(function (o) {
-                    return '<option value="' + esc(o[0]) + '"' + (String(f.value) === String(o[0]) ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
-                }).join('') + '</select>';
+                // Gespeicherter Wert, den die Liste nicht (mehr) kennt: als eigene Option
+                // behalten, sonst wählt der Browser die erste und Speichern löscht ihn
+                var known = f.options.some(function (o) { return String(f.value) === String(o[0]); });
+                html = '<select id="' + id + '"' + attrs + '>'
+                    + (!known && f.value !== '' && f.value != null ? '<option value="' + esc(f.value) + '" selected>' + esc(f.value) + ' (nicht mehr in der Liste)</option>' : '')
+                    + f.options.map(function (o) {
+                        return '<option value="' + esc(o[0]) + '"' + (String(f.value) === String(o[0]) ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+                    }).join('') + '</select>';
                 break;
             case 'checkbox_group':
                 html = '<div class="checks" id="' + id + '"' + attrs + '>' + f.options.map(function (o, i) {

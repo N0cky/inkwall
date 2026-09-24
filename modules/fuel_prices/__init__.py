@@ -264,7 +264,7 @@ class FuelPricesModule(InkwallModule):
         """Stationen im Umkreis mit ID und Preis auflisten, feste Stationen prüfen, Stand der Historie zeigen."""
         from . import history
         from .data_source import (FUEL_SHORT, fetch_fuel_content, parse_fuels, parse_location, parse_stations, radius_km,
-                                  search_radius, station_detail)
+                                  remember_radius_result, search_radius, station_detail)
         from .renderer import format_price
         if not env.get("FUEL_API_KEY", "").strip():
             return {"ok": False, "message": "API-Key fehlt – kostenlos bei Tankerkönig registrieren"}
@@ -276,6 +276,7 @@ class FuelPricesModule(InkwallModule):
         if loc is None and not fixed:
             return {"ok": False, "message": "Koordinaten oder feste Stationen fehlen"}
         ok = True
+        fresh = False                   # True: die Umkreissuche ist schon der aktuelle Stand
         if fixed:
             details.append("Feste Stationen:")
             for label, sid in fixed:
@@ -296,7 +297,9 @@ class FuelPricesModule(InkwallModule):
                 prices = " · ".join(f"{FUEL_SHORT[f]} {format_price(s['prices'][f])}" for f in fuels if s["prices"].get(f) is not None)
                 where = f"{s['street']}, {s['place']}".strip(", ")
                 details.append(f"{s['name']} ({s['dist_km']} km, {where}): {prices or 'keine Preise'}{'' if s['is_open'] else ' · geschlossen'} · ID {s['id']}")
-        content = fetch_fuel_content(True)
+            # Ohne feste Stationen ist das genau die Abfrage fürs Display – nicht gleich nochmal schicken
+            fresh = remember_radius_result(found)
+        content = fetch_fuel_content(not fresh)
         if not content:
             return {"ok": False, "message": "Keine Preise ladbar – API-Key und Koordinaten prüfen", "details": details}
         days = history.days_collected(primary)

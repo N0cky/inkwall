@@ -205,7 +205,8 @@ class SettingsValidationFlowTest(unittest.TestCase):
             server_module.ensure_runtime_started()
 
         log_startup.assert_called_once()
-        render_image.assert_called_once()
+        # Kein Render beim Start (Gunicorns Start-Timeout) – das erledigt der Worker sofort
+        render_image.assert_not_called()
         thread_ctor.assert_called_once()
 
     def test_default_config_file_path_points_to_config_directory(self) -> None:

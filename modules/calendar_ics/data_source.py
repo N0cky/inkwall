@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import DATA_DIR, get_int_setting, get_setting, local_tz, now_local
-from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS
+from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -404,6 +404,8 @@ def fetch_ics_events(url: str, force_refresh: bool = False) -> list[dict] | None
                 return list(entry["events"])
             if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
                 return list(entry["events"]) if entry["events"] is not None else None
+        if not network_allowed():
+            return list(entry["events"]) if entry is not None and entry["events"] is not None else None
         _CACHE[url] = {
             "fetched_at": entry["fetched_at"] if entry else 0.0,
             "last_attempt_at": now,
@@ -442,15 +444,38 @@ def source_state(url: str) -> dict:
 
 
 def should_refresh_calendar() -> bool:
+    """
+    Neu rendern, wenn der Stand eines eingetragenen Kalenders abgelaufen ist.
+    Nur die Quellen aus den Einstellungen zählen: ein entfernter Kalender wird
+    nie mehr geladen und würde sonst jeden Durchlauf einen Neu-Render auslösen.
+    """
     cache_seconds = get_int_setting("CALENDAR_CACHE_SECONDS", DEFAULT_CACHE_SECONDS, 60, 86400)
     now = time.time()
+    urls = [url for _, url in parse_sources(get_setting("CALENDAR_ICS_URLS", ""))]
     with _LOCK:
-        for entry in _CACHE.values():
+        for url in urls:
+            entry = _CACHE.get(url)
+            if entry is None or entry["events"] is None:
+                continue
             if now - entry["last_attempt_at"] < FETCH_RETRY_BACKOFF_SECONDS:
                 continue
             if now - entry["fetched_at"] >= cache_seconds:
                 return True
     return False
+
+
+def prune_cache(keep: list[str]) -> None:
+    """Stände entfernter Kalender vergessen – auch den privaten ICS-Text auf Platte."""
+    wanted = set(keep)
+    with _LOCK:
+        _load_disk_cache()
+        stale = [url for url in _CACHE if url not in wanted]
+        if not stale:
+            return
+        for url in stale:
+            del _CACHE[url]
+        _save_disk_cache()
+    log.info(f"Kalender-Cache: {len(stale)} nicht mehr eingetragene Kalender entfernt")
 
 
 def clear_cache() -> None:
@@ -557,6 +582,8 @@ def fetch_calendar_content(force_refresh: bool = False) -> dict | None:
 
     cache_seconds = get_int_setting("CALENDAR_CACHE_SECONDS", DEFAULT_CACHE_SECONDS, 60, 86400)
     now = now_local()
+    if network_allowed():
+        prune_cache([url for _, url in sources])
     sources_events: list[tuple[str, str, list[dict]]] = []
     loaded_index: list[int] = []
     oldest_stale = 0.0

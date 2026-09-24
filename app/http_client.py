@@ -10,6 +10,8 @@ Abhängigkeiten zu Modul-spezifischem Code.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import io
 import threading
 import time
@@ -32,10 +34,56 @@ log = get_logger(__name__)
 # Verhindert Fetch- und Re-Render-Schleifen im Poll-Takt bei Ausfällen.
 FETCH_RETRY_BACKOFF_SECONDS = 300
 
+# Verbindungsaufbau darf nie so lange dauern wie das Lesen der Antwort: ein
+# abgeschalteter Server soll den Render nicht 3 × 30 s aufhalten.
+CONNECT_TIMEOUT_SECONDS = 6
+
+
+class _TimeoutAdapter(HTTPAdapter):
+    """Ein einzelner timeout-Wert gilt fürs Lesen, der Verbindungsaufbau bekommt höchstens CONNECT_TIMEOUT_SECONDS."""
+
+    def send(self, request, timeout=None, **kwargs):
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            timeout = (min(CONNECT_TIMEOUT_SECONDS, timeout), timeout)
+        return super().send(request, timeout=timeout, **kwargs)
+
+
 HTTP_SESSION = requests.Session()
-_retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504])
-HTTP_SESSION.mount("http://",  HTTPAdapter(max_retries=_retry))
-HTTP_SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+# Wiederholt nur, was schnell scheitert: Verbindungsfehler und 502/503/504.
+# - read=0: ein Server, der nicht antwortet, kostet einmal das Timeout, nicht dreimal
+# - kein Retry-After: urllib3 würde ungedeckelt so lange schlafen, wie der Server
+#   verlangt – unter dem Render-Lock hinge dann der ganze Worker (und das Speichern)
+_retry = Retry(total=2, connect=2, read=0, status=2, backoff_factor=0.5,
+               status_forcelist=[502, 503, 504], respect_retry_after_header=False)
+HTTP_SESSION.mount("http://",  _TimeoutAdapter(max_retries=_retry))
+HTTP_SESSION.mount("https://", _TimeoutAdapter(max_retries=_retry))
+
+
+# ---------------------------------------------------------------------------
+# Nur aus dem Cache (Zusammenfassungen, /metrics)
+# ---------------------------------------------------------------------------
+
+_cache_only: contextvars.ContextVar[bool] = contextvars.ContextVar("inkwall_cache_only", default=False)
+
+
+@contextlib.contextmanager
+def cache_only():
+    """
+    Datenquellen liefern in diesem Block nur, was sie schon haben, und gehen
+    nicht ins Netz. Für alles, was nur anzeigt (Zusammenfassungen auf der
+    Anzeige-Seite, /metrics): sonst würde jeder Seitenaufruf oder Scrape
+    abgelaufene Quellen neu laden – auch die von abgeschalteten Inhalten.
+    """
+    token = _cache_only.set(True)
+    try:
+        yield
+    finally:
+        _cache_only.reset(token)
+
+
+def network_allowed() -> bool:
+    """False innerhalb von cache_only(): Datenquellen antworten dann aus dem Cache."""
+    return not _cache_only.get()
 
 
 # ---------------------------------------------------------------------------

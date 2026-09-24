@@ -24,6 +24,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, redirect, render_template, request, send_file, jsonify, url_for
@@ -45,6 +46,8 @@ from app.config import (
     SETTINGS_GROUPS        as FRAMEWORK_SETTINGS_GROUPS,
     apply_runtime_config,
     get_settings_values,
+    override_runtime_config,
+    settings_lock,
     validate_settings,
     write_env_settings,
     should_flip_output,
@@ -122,6 +125,25 @@ _render_cond = threading.Condition()
 _render_generation = 0          # zählt abgeschlossene Render-Zyklen
 _render_in_progress = False
 _force_render_requested = False
+
+# Lebenszeichen des Workers für /health: Zeitpunkt der letzten Aktivität
+# (Beginn oder Ende eines Durchlaufs). Bleibt es aus, hängt oder fehlt der Worker.
+_worker_heartbeat = 0.0
+WORKER_STALE_MIN_S = 900        # so lange darf ein Durchlauf samt Wartezeit mindestens dauern
+WORKER_ERROR_PAUSE_S = 30       # nach einem unerwarteten Fehler im Worker so lange bis zum nächsten Versuch
+
+
+def _module_hook(mod, hook: str, default, *args):
+    """
+    Modul-Hook aufrufen. Wirft ein Modul, gilt der Standardwert (aus, keine
+    Änderung) – ein fehlerhaftes Modul darf weder den Render-Durchlauf noch
+    den Worker abbrechen.
+    """
+    try:
+        return getattr(mod, hook)(*args)
+    except Exception as exc:
+        log.error(f"{hook} [{getattr(mod, 'MODULE_ID', '?')}]: {exc}", exc_info=True)
+        return default
 
 
 def _get_local_now() -> datetime:
@@ -226,7 +248,7 @@ def _get_effective_idle_modules(env: dict[str, str]) -> tuple[list, int]:
     """Idle-Module und Takt, die jetzt gelten: das Programm oder das aktive Zeitfenster."""
     raw_env = env
     env, cfg, state = _effective_programme(env)
-    enabled_idle = [m for m in _registry.get_idle_modules() if m.is_enabled(env)]
+    enabled_idle = [m for m in _registry.get_idle_modules() if _module_hook(m, "is_enabled", False, env)]
     rotation = max(int(getattr(cfg, "idle_module_rotation_seconds", 120)), 1)
     window = state.get("window")
     if window is None or not window.content:
@@ -236,7 +258,7 @@ def _get_effective_idle_modules(env: dict[str, str]) -> tuple[list, int]:
     if chosen:
         return chosen, rotation
     log.warning(f"Zeitfenster „{window.name}“: keiner seiner Inhalte ist bereit – das Programm läuft weiter")
-    return [m for m in _registry.get_idle_modules() if m.is_enabled(raw_env)], rotation
+    return [m for m in _registry.get_idle_modules() if _module_hook(m, "is_enabled", False, raw_env)], rotation
 
 
 def _compute_image_hash() -> str:
@@ -488,10 +510,23 @@ def render_if_changed(last_state_key: str | None) -> str | None:
     alte State-Key zurückgegeben, damit der nächste Tick es erneut versucht.
 
     Läuft vollständig unter _render_lock: Worker und Requests können nie
-    gleichzeitig rendern oder schreiben.
+    gleichzeitig rendern oder schreiben. Die Konfiguration ist für die Dauer
+    des Renders eingefroren – wer währenddessen speichert, wartet nicht auf
+    den Render und ändert ihn auch nicht mittendrin; der nächste Render
+    (vom Speichern angefordert) nimmt den neuen Stand.
     """
-    with _render_lock:
+    with _render_lock, override_runtime_config():
         return _render_if_changed_locked(last_state_key)
+
+
+def _module_state_key(mod, content, suffix: str = "") -> str | None:
+    """State-Key eines Moduls; None, wenn das Modul dabei wirft (es wird dann übersprungen)."""
+    try:
+        return f"{mod.MODULE_ID}:{mod.get_state_key(content)}{suffix}"
+    except Exception as exc:
+        log.error(f"get_state_key [{mod.MODULE_ID}]: {exc}", exc_info=True)
+        _count_render_error(mod.MODULE_ID)
+        return None
 
 
 def _render_if_changed_locked(last_state_key: str | None) -> str | None:
@@ -499,7 +534,7 @@ def _render_if_changed_locked(last_state_key: str | None) -> str | None:
 
     # ── 1. Prioritätsmodule (MODULE_PRIORITY < 10, z. B. Plex) ───────────────
     for mod in _registry.get_priority_modules():
-        if not mod.is_enabled(env):
+        if not _module_hook(mod, "is_enabled", False, env):
             continue
         try:
             content = mod.fetch_content(env)
@@ -510,8 +545,10 @@ def _render_if_changed_locked(last_state_key: str | None) -> str | None:
         if content is None:
             continue
 
-        state_key = f"{mod.MODULE_ID}:{mod.get_state_key(content)}"
-        if state_key != last_state_key or mod.should_refresh(env):
+        state_key = _module_state_key(mod, content)
+        if state_key is None:
+            continue
+        if state_key != last_state_key or _module_hook(mod, "should_refresh", False, env):
             try:
                 image = mod.render(env, content)
                 _save_image(image, state_key, mod.MODULE_ID)
@@ -534,7 +571,7 @@ def _render_if_changed_locked(last_state_key: str | None) -> str | None:
             result = None
         if result is not None:
             image, state_key = result
-            needs_refresh = any(m.should_refresh(env) for m in enabled_idle)
+            needs_refresh = any(_module_hook(m, "should_refresh", False, env) for m in enabled_idle)
             if state_key != last_state_key or needs_refresh:
                 try:
                     _save_image(image, state_key, "dashboard")
@@ -561,8 +598,10 @@ def _render_if_changed_locked(last_state_key: str | None) -> str | None:
             if content is None:
                 continue
 
-            state_key = f"{mod.MODULE_ID}:{mod.get_state_key(content)}:{slot}"
-            if state_key != last_state_key or mod.should_refresh(env):
+            state_key = _module_state_key(mod, content, f":{slot}")
+            if state_key is None:
+                continue
+            if state_key != last_state_key or _module_hook(mod, "should_refresh", False, env):
                 try:
                     image = mod.render(env, content)
                     _save_image(image, state_key, mod.MODULE_ID)
@@ -651,11 +690,14 @@ def _get_background_poll_seconds() -> int:
     candidates = [max(1, int(cfg.refresh_interval))]
 
     for mod in _registry.get_modules():
-        if not mod.is_enabled(env):
+        if not _module_hook(mod, "is_enabled", False, env):
             continue
-        custom = mod.get_background_poll_seconds(env)
-        if custom is not None:
-            candidates.append(max(1, int(custom)))
+        custom = _module_hook(mod, "get_background_poll_seconds", None, env)
+        try:
+            if custom is not None:
+                candidates.append(max(1, int(custom)))
+        except (TypeError, ValueError):
+            log.warning(f"get_background_poll_seconds [{mod.MODULE_ID}]: keine Zahl ({custom!r})")
 
     base_poll = min(candidates)
     if _is_priority_media_type(_esp32_state.get("media_type", "")):
@@ -753,6 +795,31 @@ def _log_notifications(kinds: list) -> None:
         log_event("device", f"{device}: {text}" if kind in ("offline", "online", "firmware", "rollback", "errors") else text, level)
 
 
+# Ein Thread für alle Nachrichten der Rückmeldungen: nacheinander zugestellt,
+# und die Antwort ans Gerät wartet nicht auf einen Discord-Upload
+_notify_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inkwall-notify")
+
+
+def _notify_ack(notifier, ack_data: dict, previous: dict) -> None:
+    try:
+        _log_notifications(notifier.on_ack(ack_data, previous))
+    except Exception as exc:
+        log.warning(f"ACK-Benachrichtigung: {exc}")
+
+
+def _dispatch_ack_notifications(ack_data: dict, previous: dict) -> None:
+    """Mit Ziel im Hintergrund; ohne Ziel nur die Merker nachziehen (kein Netz, sofort)."""
+    try:
+        notifier = _notifier()
+    except Exception as exc:
+        log.warning(f"ACK-Benachrichtigung: {exc}")
+        return
+    if notifier.url:
+        _notify_pool.submit(_notify_ack, notifier, ack_data, previous)
+    else:
+        _notify_ack(notifier, ack_data, previous)
+
+
 def _check_device_offline() -> None:
     """Nach jedem Worker-Durchlauf: Ausfall, Quellen, Tagesbild, Wochenbericht."""
     try:
@@ -774,14 +841,36 @@ def _check_device_offline() -> None:
 
 
 def periodic_worker() -> None:
+    global _worker_heartbeat
     last_state_key: str | None = None
 
     while True:
-        last_state_key = _run_worker_cycle(last_state_key)
-        _check_device_offline()
+        _worker_heartbeat = time.time()
+        try:
+            last_state_key = _run_worker_cycle(last_state_key)
+            _check_device_offline()
+            poll = _get_background_poll_seconds()
+        except Exception as exc:
+            # Nichts darf diese Schleife beenden: ohne Worker friert das Display
+            # ein, und niemand merkt es, weil die Weboberfläche weiterläuft
+            log.error(f"periodic_worker: {exc}", exc_info=True)
+            poll = WORKER_ERROR_PAUSE_S
+        _worker_heartbeat = time.time()
         # Warten bis zum nächsten Poll oder bis ein Request den Worker weckt
-        _wake_event.wait(timeout=_get_background_poll_seconds())
+        _wake_event.wait(timeout=poll)
         _wake_event.clear()
+
+
+def _worker_health() -> dict:
+    """Lebt der Worker, und war er zuletzt aktiv? Ohne gestarteten Worker (Tests, Import) gilt ok."""
+    thread = _worker_thread
+    if thread is None or not hasattr(thread, "is_alive"):
+        return {"running": False, "ok": True}
+    alive = thread.is_alive()
+    age = int(time.time() - _worker_heartbeat) if _worker_heartbeat else None
+    limit = max(WORKER_STALE_MIN_S, 3 * int(get_cfg().refresh_interval) + 60)
+    stale = age is not None and age > limit
+    return {"running": alive, "ok": alive and not stale, "last_activity_s": age, "stale_after_s": limit}
 
 
 # ---------------------------------------------------------------------------
@@ -887,13 +976,16 @@ def _validate_all_settings(updates: dict[str, str], all_fields: list[dict]) -> l
 
 @app.route("/health", methods=["GET"])
 def health():
+    """503, sobald der Render-Worker tot ist oder hängt – dann schlägt auch der Docker-Healthcheck an."""
     from app.config import APP_VERSION
+    worker = _worker_health()
     return jsonify({
-        "ok": True,
+        "ok": worker["ok"],
         "version": APP_VERSION,
         "ui_password": bool(_ui_password()),
+        "worker": worker,
         "modules": _build_module_health(),
-    })
+    }), (200 if worker["ok"] else 503)
 
 
 @app.route("/logo.png", methods=["GET"])
@@ -982,29 +1074,29 @@ def render_module_preview(module_id: str, theme: str | None = None, device: bool
     liefert die 6-Farben-Vorschau, wie sie das Spectra-6-Display zeigt.
     Gibt None zurück, wenn das Modul gerade keinen Inhalt hat.
     """
-    from app.config import override_runtime_config
-
     mod = _registry.get_module_by_id(module_id)
     if mod is None and module_id != "dashboard":
         raise LookupError(module_id)
 
-    with _render_lock:
-        changes = {"display_theme": theme} if theme else {}
-        with override_runtime_config(**changes):
-            env = get_settings_values()
-            if module_id == "dashboard":
-                from app.dashboard import compose_dashboard
-                env, cfg, _ = _effective_programme(env)
-                enabled_idle = [m for m in _registry.get_idle_modules() if m.is_enabled(env)]
-                result = compose_dashboard(env, cfg, _dashboard_modules(enabled_idle, cfg))
-                if result is None:
-                    return None
-                image = result[0]
-            else:
-                content = mod.fetch_content(env)
-                if content is None:
-                    return None
-                image = mod.render(env, content)
+    # Ohne Render-Lock: das Theme gilt nur in diesem Thread (override_runtime_config),
+    # und das Display-Bild wird nicht angefasst. So warten weder der Worker noch
+    # das Speichern auf eine Vorschau, deren Quellen gerade langsam sind.
+    changes = {"display_theme": theme} if theme else {}
+    with override_runtime_config(**changes):
+        env = get_settings_values()
+        if module_id == "dashboard":
+            from app.dashboard import compose_dashboard
+            env, cfg, _ = _effective_programme(env)
+            enabled_idle = [m for m in _registry.get_idle_modules() if _module_hook(m, "is_enabled", False, env)]
+            result = compose_dashboard(env, cfg, _dashboard_modules(enabled_idle, cfg))
+            if result is None:
+                return None
+            image = result[0]
+        else:
+            content = mod.fetch_content(env)
+            if content is None:
+                return None
+            image = mod.render(env, content)
 
     if device:
         _, image = convert_to_spectra6(image)
@@ -1048,17 +1140,20 @@ def image_hash():
 
 @app.route("/meta.json", methods=["GET"])
 def meta_json():
-    state = _esp32_state.get("state", "idle")
-    fmt   = _esp32_state.get("format", get_cfg().output_format)
-    media_type = _esp32_state.get("media_type", "idle")
+    # Eine Momentaufnahme: der Worker ersetzt _esp32_state als Ganzes, Hash und
+    # Zustand dürfen nicht aus zwei verschiedenen Renders stammen
+    current = _esp32_state
+    state = current.get("state", "idle")
+    fmt   = current.get("format", get_cfg().output_format)
+    media_type = current.get("media_type", "idle")
     next_wake_sec, next_wake_reason = _suggest_next_wake(state, media_type)
     from app.device import firmware_info
     payload = {
-        "hash":          _esp32_state.get("hash", ""),
+        "hash":          current.get("hash", ""),
         "format":        fmt,
         "state":         state,
         "media_type":    media_type,
-        "rendered_at":   _esp32_state.get("rendered_at", ""),
+        "rendered_at":   current.get("rendered_at", ""),
         "next_wake_sec": next_wake_sec,
         "next_wake_reason": next_wake_reason,
         "image_url":     f"/current.{fmt}",
@@ -1096,7 +1191,7 @@ def ack():
     """
     global _last_ack
     from app import monitoring
-    from app.device import append_device_log, firmware_info, load_device_state, normalize_ack, save_device_state
+    from app.device import append_device_log, firmware_info, normalize_ack, update_device_state
     body = request.get_json(silent=True) or {}
     ack_data = normalize_ack(body, request.remote_addr)
     previous = dict(_last_ack)
@@ -1111,12 +1206,10 @@ def ack():
     monitoring.record_ack(ack_data, matches)
     monitoring.increment("inkwall_acks_total", result=result)
     try:
-        _log_notifications(_notifier().on_ack(ack_data, previous))
-        state = load_device_state()
-        state["last_ack"] = ack_data
-        save_device_state(state)
+        update_device_state(lambda state: state.__setitem__("last_ack", dict(ack_data)))
     except Exception as exc:
         log.warning(f"ACK-Beobachtung: {exc}")
+    _dispatch_ack_notifications(dict(ack_data), previous)
 
     if isinstance(body.get("log"), list):
         append_device_log(device, body["log"], ack_data["ack_at"])
@@ -1133,7 +1226,7 @@ def ack():
     fw_now = ack_data.get("fw_version", "")
     if fw_now and previous.get("fw_version") and previous.get("fw_version") != fw_now:
         log_event("device", f"Gerät {device} läuft jetzt Firmware {fw_now}")
-    from app.device import consume_test_banner, mark_cleaned
+    from app.device import mark_cleaned
     if ack_data.get("cleaned"):
         mark_cleaned(_get_local_now())
         log_event("device", f"Gerät {device} hat das Panel gereinigt")
@@ -1142,7 +1235,8 @@ def ack():
         log_event("device", f"Gerät {device} ist wieder erreichbar – war {max(1, offline_s // 60)} min ohne Verbindung", logging.WARNING)
     if result == "test":
         log_event("device", f"Gerät {device} zeigt den Offline-Hinweis zur Probe")
-    consume_test_banner()
+    # Den Test-Auftrag verbraucht allein /meta.json: ein Zyklus, der beim Klick
+    # schon lief, darf mit seiner Rückmeldung den frischen Auftrag nicht löschen
     rssi = ack_data.get("rssi")
     if isinstance(rssi, int) and rssi < -82:
         log_event("device", f"Gerät {device}: WLAN sehr schwach ({rssi} dBm)", logging.WARNING)
@@ -1416,8 +1510,11 @@ def _apply_updates_and_render(updates: dict[str, str], wait_seconds: float = 0.0
     ihr gibt – nur die Änderungen zu übergeben würde alle anderen Werte aus
     dem Speicher werfen.
     """
-    write_env_settings(updates)
-    with _render_lock:
+    # Schreiben und Übernehmen am Stück (zwei Speichervorgänge gleichzeitig
+    # verlieren sonst eine Änderung). Kein Render-Lock: ein laufender Render
+    # arbeitet mit seinem eingefrorenen Stand weiter, der angeforderte nimmt den neuen.
+    with settings_lock:
+        write_env_settings(updates)
         apply_runtime_config({**get_settings_values(), **updates})
     log_event("settings", "Einstellungen gespeichert")
     request_render(wait_seconds=wait_seconds, reason="Einstellungen gespeichert")
@@ -1644,7 +1741,7 @@ def log_startup_config() -> None:
         except Exception as exc:
             summary = {"Fehler": str(exc)}
         parts = ", ".join(f"{k}: {v}" for k, v in summary.items())
-        log.info(f"[{mod.MODULE_ID}] {'aktiv' if mod.is_enabled(env) else 'inaktiv'} – {parts}")
+        log.info(f"[{mod.MODULE_ID}] {'aktiv' if _module_hook(mod, 'is_enabled', False, env) else 'inaktiv'} – {parts}")
 
 
 def _restore_last_ack() -> None:
@@ -1661,10 +1758,52 @@ def _restore_last_ack() -> None:
         log.warning(f"Letzte Rückmeldung nicht wiederherstellbar: {exc}")
 
 
+def _restore_render_state() -> None:
+    """
+    Hash und Zustand des letzten Bilds von der Platte: /meta.json liefert nach
+    einem Neustart ab der ersten Anfrage einen gültigen Hash, auch bevor der
+    erste Render fertig ist. Ist das neue Bild gleich, schreibt der Worker
+    nichts neu und das Gerät lädt nichts.
+    """
+    global _esp32_state
+    if _esp32_state.get("hash"):
+        return
+    try:
+        image_hash = _compute_image_hash()
+        if not image_hash:
+            return
+        cfg = get_cfg()
+        path = CURRENT_BMP_PATH if cfg.output_format == "bmp" else CURRENT_IMAGE_PATH
+        try:
+            state_key = STATE_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            state_key = ""
+        media_type = state_key.split(":", 1)[0] if state_key else ""
+        if media_type == "__no_content__":
+            media_type = "none"
+        elif media_type != "dashboard" and _registry.get_module_by_id(media_type) is None:
+            media_type = "idle"
+        _esp32_state = {
+            "hash":        image_hash,
+            "format":      cfg.output_format,
+            "state":       state_key or "idle",
+            "media_type":  media_type or "idle",
+            "rendered_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        log.info(f"Letztes Bild übernommen: {media_type or 'idle'}, hash={image_hash[:8]}…")
+    except Exception as exc:
+        log.warning(f"Letztes Bild nicht übernehmbar: {exc}")
+
+
 def ensure_runtime_started() -> None:
     """
-    Startet Initial-Render und Background-Worker genau einmal pro Prozess.
-    Wichtig für WSGI-Server wie Gunicorn, bei denen __main__ nicht ausgeführt wird.
+    Startet den Background-Worker genau einmal pro Prozess. Wichtig für
+    WSGI-Server wie Gunicorn, bei denen __main__ nicht ausgeführt wird.
+
+    Kein Render beim Import: mit langsamen Quellen dauert der erste Render
+    länger als Gunicorns Start-Timeout, der Web-Worker würde dann in einer
+    Schleife neu gestartet. Der Worker rendert sofort nach dem Start, bis
+    dahin gilt das letzte Bild von der Platte.
     """
     global _runtime_started, _worker_thread
 
@@ -1678,9 +1817,7 @@ def ensure_runtime_started() -> None:
         log.info(f"Module geladen: {[m.MODULE_ID for m in _registry.get_modules()]}")
         log_startup_config()
         _restore_last_ack()
-
-        if not CURRENT_IMAGE_PATH.exists():
-            render_image()
+        _restore_render_state()
 
         _worker_thread = threading.Thread(
             target=periodic_worker,

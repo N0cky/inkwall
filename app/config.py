@@ -13,9 +13,12 @@ importieren – es steht am Anfang der Dependency-Chain.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import os
 import re
+import tempfile
+import threading
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 
@@ -611,11 +614,14 @@ class RuntimeConfig:
 
 
 _cfg: RuntimeConfig = RuntimeConfig()
+# Überschreibung nur für den laufenden Thread (Vorschau mit anderem Theme,
+# eingefrorener Stand während eines Renders). Andere Threads sehen weiter _cfg.
+_cfg_override: contextvars.ContextVar[RuntimeConfig | None] = contextvars.ContextVar("inkwall_cfg_override", default=None)
 
 
 def get_cfg() -> RuntimeConfig:
     """Immer per Funktionsaufruf lesen – niemals _cfg direkt importieren!"""
-    return _cfg
+    return _cfg_override.get() or _cfg
 
 
 # Alle Display-Themes, die Module kennen müssen (Settings-Select + Vorschau).
@@ -632,35 +638,36 @@ def is_flat_theme(theme: str) -> bool:
 @contextlib.contextmanager
 def override_runtime_config(**changes):
     """
-    Ersetzt die RuntimeConfig vorübergehend (z. B. display_theme für eine
-    Vorschau). Nur unter dem Render-Lock des Servers verwenden, damit kein
-    paralleler Render die Änderung sieht. Stellt beim Verlassen die alte
-    Config wieder her, auch bei Exceptions.
+    Ersetzt die RuntimeConfig vorübergehend, aber nur für den laufenden
+    Thread (z. B. display_theme für eine Vorschau). Ein paralleler Render,
+    das Speichern oder eine andere Anfrage sehen die Änderung nie. Stellt
+    beim Verlassen den vorherigen Stand wieder her, auch bei Exceptions.
+    Ohne Änderungen friert der Block den aktuellen Stand ein: wer in der
+    Zwischenzeit speichert, ändert den laufenden Render nicht mittendrin.
     """
-    global _cfg
-    previous = _cfg
-    if not changes:
-        yield previous
-        return
-    settings = dict(previous.settings_values)
-    if "display_theme" in changes:
-        settings["DISPLAY_THEME"] = str(changes["display_theme"])
-    _cfg = _dc_replace(previous, settings_values=settings, **changes)
+    previous = get_cfg()
+    current = previous
+    if changes:
+        settings = dict(previous.settings_values)
+        if "display_theme" in changes:
+            settings["DISPLAY_THEME"] = str(changes["display_theme"])
+        current = _dc_replace(previous, settings_values=settings, **changes)
+    token = _cfg_override.set(current)
     try:
-        yield _cfg
+        yield current
     finally:
-        _cfg = previous
+        _cfg_override.reset(token)
 
 
 def get_setting(name: str, default: str = "") -> str:
-    value = _cfg.settings_values.get(name)
+    value = get_cfg().settings_values.get(name)
     if value is None or value == "":
         return default
     return str(value)
 
 
 def get_bool_setting(name: str, default: bool = False) -> bool:
-    raw = _cfg.settings_values.get(name)
+    raw = get_cfg().settings_values.get(name)
     return parse_bool_env(raw, default)
 
 
@@ -670,7 +677,7 @@ def get_int_setting(
     min_val: int | None = None,
     max_val: int | None = None,
 ) -> int:
-    raw = _cfg.settings_values.get(name)
+    raw = get_cfg().settings_values.get(name)
     if raw is None or raw == "":
         return default
     try:
@@ -729,14 +736,25 @@ def read_env_settings() -> dict[str, str]:
     }
 
 
+# Lesen, Ändern, Schreiben und Übernehmen der Einstellungen am Stück: zwei
+# gleichzeitige Speichervorgänge (zwei Tabs, zwei Karten kurz nacheinander)
+# würden sonst eine der Änderungen verlieren. Wer schreibt und danach
+# apply_runtime_config() aufruft, hält die Sperre über beides.
+settings_lock = threading.RLock()
+
+
 def write_env_settings(updates: dict[str, str]) -> None:
     """Schreibt die aktive Env-Konfigurationsdatei atomar via Temp-Datei + rename."""
-    ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines = ENV_FILE_PATH.read_text(encoding="utf-8").splitlines() if ENV_FILE_PATH.exists() else []
-
     for key in updates:
         if not _ENV_KEY_RE.match(key):
             raise ValueError(f"Ungültiger Settings-Key: {key!r}")
+    with settings_lock:
+        _write_env_settings_locked(updates)
+
+
+def _write_env_settings_locked(updates: dict[str, str]) -> None:
+    ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = ENV_FILE_PATH.read_text(encoding="utf-8").splitlines() if ENV_FILE_PATH.exists() else []
 
     remaining = dict(updates)
     new_lines: list[str] = []
@@ -760,9 +778,25 @@ def write_env_settings(updates: dict[str, str]) -> None:
         new_lines.append(f"{key}={format_env_value(value)}")
 
     content = "\n".join(new_lines).rstrip() + "\n"
-    tmp = ENV_FILE_PATH.with_suffix(".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(ENV_FILE_PATH)
+    # Eigener Temp-Name je Aufruf: ein fester Name ließe zwei Schreiber dieselbe Datei tauschen
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{ENV_FILE_PATH.name}.", suffix=".tmp", dir=ENV_FILE_PATH.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(content)
+        _copy_mode(ENV_FILE_PATH, tmp_name)
+        os.replace(tmp_name, ENV_FILE_PATH)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def _copy_mode(original: Path, tmp_name: str) -> None:
+    """mkstemp legt 0600 an – die Rechte der bisherigen Datei übernehmen, sonst 0600 lassen."""
+    try:
+        os.chmod(tmp_name, os.stat(original).st_mode & 0o777)
+    except OSError:
+        pass
 
 
 def validate_settings(updates: dict[str, str], all_fields: list[dict] | None = None) -> list[str]:
@@ -948,7 +982,7 @@ def apply_runtime_config(settings: dict[str, str] | None = None) -> None:
 
 def get_settings_values() -> dict[str, str]:
     """Gibt alle aktuellen Konfigurationswerte als String-Dict zurück."""
-    return dict(_cfg.settings_values)
+    return dict(get_cfg().settings_values)
 
 
 def collect_settings_form_data(form, all_fields: list[dict]) -> dict[str, str]:
@@ -971,7 +1005,7 @@ def collect_settings_form_data(form, all_fields: list[dict]) -> dict[str, str]:
 
 
 def get_settings_runtime_summary() -> dict[str, str]:
-    cfg = _cfg
+    cfg = get_cfg()
     return {
         "render_size":         f"{cfg.render_width}x{cfg.render_height}",
         "rotation":            f"{cfg.display_rotation}°",
@@ -1007,7 +1041,7 @@ def local_tz():
     """ZoneInfo der konfigurierten Zeitzone, Fallback Europe/Berlin, dann UTC."""
     from datetime import timezone as _tz
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    name = (_cfg.timezone if _cfg is not None else "") or "Europe/Berlin"
+    name = get_cfg().timezone or "Europe/Berlin"
     try:
         return ZoneInfo(name)
     except ZoneInfoNotFoundError:
