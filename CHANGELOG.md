@@ -41,6 +41,8 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Firmware 1.3.0 asks for `/meta.json?sleep=from_meta` and subtracts the time spent after it (download, refresh, acknowledgement) from `next_wake_sec`; the server then only accounts for the time up to `/meta.json` (`meta_ms`). A cycle with a 30 s refresh no longer shifts the next wake-up past the rotation boundary
 - Optional device token (`INKWALL_DEVICE_TOKEN` in the container, `DEVICE_TOKEN` in the firmware from 1.3.1): `/firmware.bin` – which contains the Wi-Fi password – `/firmware.json` and `/ack` then need the token (header `X-Inkwall-Token`) or the UI password; images and `/meta.json` stay open
 - Firmware 1.3.1: sends the device token with every request including the firmware download; the line "wird mit dieser Rückmeldung bestätigt" now reaches the device log on the server
+- Setup help on the *Gerät* page: as long as no device has reported, it shows the address to enter as `SERVER_BASE_URL`, links the firmware instructions and names settings that do not fit the panel; once the firmware reports, it warns when the output format or the image size would keep the panel from getting an image
+- `PUID` / `PGID` for the container (Unraid: `99` / `100`): the files in the volumes belong to that user; without them it stays `1000`
 
 ### Changed
 
@@ -75,6 +77,11 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Kalender and Müllabfuhr read ICS files through one shared parser (`app/ics.py`, based on `icalendar` and `recurring-ical-events`, two new dependencies) instead of two hand-written ones; the Müllabfuhr now also understands repeat rules ("alle zwei Wochen") and cancelled dates. Expanded appointments are remembered per calendar state, and an unchanged calendar is no longer rewritten to disk on every fetch
 - Web interface: "Verbindung prüfen" on the Inhalte cards tests what is in the form, before saving (empty password fields use the saved value), and says so; Enter in a card field saves instead of reloading the page; the pages poll without piling up requests, pause in a background tab and back off while the server is unreachable; the current image is only downloaded again when it changed; the three theme previews on the Gerät page render one after another
 - Web interface accessibility: switches and theme tiles have names, reordering works with ↑/↓ buttons (keyboard, touch) next to drag and drop, keyboard focus stays on the control after a change instead of jumping to the top, the card headers on Inhalte are real buttons, save results and field errors are announced to screen readers, the active page is marked in the navigation, the restore button is reachable by keyboard, and hint text has at least 4.5:1 contrast in the dark theme
+- The defaults fit the included panel: `OUTPUT_FORMAT=bmp`, `DISPLAY_ROTATION=90` (1200 × 1600) and `DISPLAY_THEME=eink`; before, a fresh installation served PNG in landscape, and the firmware got no image or refused it. Installations that set these values keep them
+- Dependencies: Flask 3.1.3, Pillow 12.3.0 (renders pixel-identical images, text and photo pages faster), requests 2.34.2 (fixes CVE-2024-47081), gunicorn 26.2.0, python-dotenv 1.2.3; every indirect package is pinned too, so every build gets the same versions
+- Docker: the program code belongs to root and is read-only for the server (it only writes to `/config`, `/output`, `/logs`); firmware sources, docs and Markdown files are no longer copied into the image; `docker-compose.yml` uses the published image and limits the Docker log to 3 × 10 MB
+- CI: ruff (syntax errors, undefined and unused names), tests on Python 3.12 and 3.13, pip cache, and a trial start of the built image as on Unraid (health check, web UI, file ownership, read-only code); `Docker Publish` only builds after the CI has passed, no longer twice per release, and reuses layers between runs
+- README: image name `ghcr.io/n0cky/inkwall`, Python 3.12 or newer, Unraid settings with `PUID`/`PGID` and *Force Update*, container environment variables, current project tree, steps to connect a panel; the licence is named after the project
 
 ### Fixed
 
@@ -110,6 +117,25 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Müllabfuhr: a collection date written as midnight in UTC (`DTSTART:20261014T220000Z`) landed on the day before
 - Web interface: edits made while a save was running were lost although the page said "Gespeichert"; a status poll that started before a save could switch the Anzeige back to the old values; clicking "Vorschau" on two contents quickly (or "Zurück zum Display" while a preview loaded) could show the wrong image; the Gerät page stayed on "Wird geladen …" when the first request failed; Enter on "Vorschau" opened the card instead of the preview; the acknowledgement table was cut off on phones; local times with an offset (Panelreinigung) were shown as raw text
 - Settings: a `|` or `;` inside a calendar, stop or station name (or `,`/`=` in a Müllabfuhr keyword) silently split the entry into the wrong fields on the next load; such entries are now rejected at the field
+- `PORT` in `settings.env` was never read; it is documented as an environment variable for `python app/server.py` (the container always listens on 8787)
+
+## [0.2.0] - 2026-04-20
+
+### Added
+
+- Night mode for idle content (`NIGHT_MODE_ENABLED`, `NIGHT_MODE_START`, `NIGHT_MODE_END`, `NIGHT_MODE_INTERVAL_MINUTES`, `NIGHT_MODE_IDLE_BEHAVIOR`, `NIGHT_MODE_FIXED_MODULE`): a slower refresh and optionally one fixed module within a local time window
+
+## [0.1.1] - 2026-04-20
+
+### Changed
+
+- Docker: the image sets `/config/settings.env`, `/output` and `/logs` as defaults, so only the three volumes need to be mapped; the configuration lives in its own `config/` folder
+- README in English, project logo
+
+### Fixed
+
+- Docker: missing output files and a crash in the DWD weather panels, both caused by missing fonts (DejaVu is now installed)
+- Docker: the server could not write to mounted volumes; the entrypoint now takes them over before dropping root
 
 ## [0.1.0] - 2026-04-20
 
@@ -125,7 +151,6 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ### Changed
 
-- Renamed to **Inkwall** (the previous name carried two trademarks). Environment variables use the prefix `INKWALL_`, the old `PLEXINK_` prefix keeps working; the firmware version marker is `INKWALL_FW_VERSION=` and the server still reads `PLEXEINK_FW_VERSION=` from older builds; the module base class is `InkwallModule` with `PlexInkModule` kept as an alias; the firmware sketch lives in `esp32/Inkwall`; Prometheus metrics are prefixed `inkwall_`
 - Migrated production serving to Gunicorn via `wsgi.py`
 - Refactored the old idle-module context model into modular service dataclasses
 - Improved dashboard diagnostics with wake reason and effective server polling interval

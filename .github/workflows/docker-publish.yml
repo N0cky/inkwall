@@ -4,12 +4,15 @@ on:
   push:
     tags:
       - "v*"
-  release:
-    types: [published]
   workflow_dispatch:
 
 jobs:
+  # Erst Tests und Container-Probelauf (ci.yml), dann bauen und veröffentlichen
+  test:
+    uses: ./.github/workflows/ci.yml
+
   docker:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,3 +58,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Schichten zwischen den Läufen wiederverwenden (pip install nur bei geänderten Abhängigkeiten)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

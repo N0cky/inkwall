@@ -235,7 +235,6 @@ def build_dwd_weather_summary(payload: dict, station_id: str) -> dict | None:
     current_gust = series_value("windGust", current_index) or scale_dwd_value(today.get("windGust"))
 
     humidity_series = forecast1.get("humidity") or []
-    hourly_forecast: list[dict] = []
     today_date = str(today.get("dayDate") or "")
     if start and step and isinstance(temperatures, list) and temperatures:
         icon_series = forecast1.get("icon")

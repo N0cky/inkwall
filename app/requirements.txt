@@ -1,8 +1,25 @@
-flask==3.0.3
-gunicorn==23.0.0
-requests==2.32.3
-Pillow==10.4.0
-python-dotenv==1.0.1
-tzdata
+# Direkt genutzt
+flask==3.1.3
+gunicorn==26.2.0
+requests==2.34.2
+Pillow==12.3.0
+python-dotenv==1.2.3
+tzdata==2026.4
 icalendar==7.3.0
 recurring-ical-events==3.8.2
+
+# Indirekt (Abhängigkeiten der obigen), fest, damit jeder Build dieselben Versionen bekommt.
+# Neu erzeugen: in einer frischen venv die Zeilen oben installieren, dann `pip freeze`.
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+idna==3.20
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+python-dateutil==2.9.0.post0
+six==1.17.0
+urllib3==2.8.0
+Werkzeug==3.1.8
+x-wr-timezone==2.0.1

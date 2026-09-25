@@ -21,7 +21,6 @@ from app.config import (
     SETTINGS_GROUPS as FRAMEWORK_GROUPS,
     get_cfg,
     get_settings_values,
-    parse_dashboard_tiles,
 )
 from app.http_client import cache_only
 from app.logger import get_logger
@@ -90,6 +89,21 @@ def _module_entry(mod, env: dict[str, str], active_module_id: str, heights: dict
 # Anzeige
 # ---------------------------------------------------------------------------
 
+# Das 13,3″-Spectra-6-Panel der mitgelieferten Firmware nimmt nur Bilder genau dieser Größe
+PANEL_SIZE = (1200, 1600)
+
+
+def panel_setup_issues(cfg) -> list[str]:
+    """Einstellungen, mit denen die mitgelieferte Firmware kein Bild bekommt oder es ablehnt."""
+    issues: list[str] = []
+    if cfg.output_format != "bmp":
+        issues.append("Ausgabeformat ist PNG – die Firmware lädt das Panel-Format, das es nur mit „BMP“ gibt.")
+    if (cfg.render_width, cfg.render_height) != PANEL_SIZE:
+        issues.append(f"Das Bild hat {cfg.render_width} × {cfg.render_height} Pixel, das Panel braucht 1200 × 1600 "
+                      "(Breite 1600, Höhe 1200, Ausrichtung 90°).")
+    return issues
+
+
 def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int, str]) -> dict[str, Any]:
     env = get_settings_values()
     cfg = get_cfg()
@@ -156,6 +170,7 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
             "clean_hour":          cfg.panel_clean_hour,
             "last_clean_at":       last_clean.isoformat() if last_clean else "",
             "test_banner_pending": test_banner_pending(),
+            "setup_issues":        panel_setup_issues(cfg),
         },
         "layout":           cfg.idle_layout,
         "rotation_seconds": cfg.idle_module_rotation_seconds,

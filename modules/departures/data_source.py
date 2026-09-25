@@ -17,7 +17,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from app.config import DATA_DIR, get_int_setting, get_setting, local_tz, now_local
 from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed

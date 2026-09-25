@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime, date
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from PIL import Image
 

@@ -23,6 +23,8 @@
 .stat .l { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .chart { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 12px; background: var(--surface3); }
 .table-scroll { overflow-x: auto; margin-top: 10px; }
+.setup { margin: 8px 0 0 18px; font-size: 13px; line-height: 1.6; }
+.setup-warn { color: var(--warn); font-size: 13px; font-weight: 700; line-height: 1.5; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .acks { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .acks th, .acks td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .acks th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
@@ -313,7 +315,11 @@ details[open] summary { margin-bottom: 8px; }
             window.__display = s;
             var d = s.device;
             var html = '';
+            var issues = (s.panel && s.panel.setup_issues) || [];
+            var issueHtml = issues.map(function (i) { return '<div class="setup-warn">⚠ ' + esc(i) + '</div>'; }).join('');
             if (d.device_id) {
+                // Eine Firmware aus diesem Projekt (meldet ihre Version) bekommt mit falschem Format oder falscher Größe kein Bild
+                if (d.fw_version && issues.length) html += issueHtml;
                 var stale = d.seconds_since_ack != null && d.seconds_since_ack > Math.max(3 * s.next.seconds, 900);
                 html += kv('Gerät', esc(d.device_id) + (d.remote ? ' <span class="hint">' + esc(d.remote) + '</span>' : ''));
                 html += kv('Zuletzt gemeldet', esc(ui.ago(d.seconds_since_ack)) + (stale ? ' <span class="chip warn">länger nicht gesehen</span>' : ' <span class="chip ok">verbunden</span>'));
@@ -349,7 +355,13 @@ details[open] summary { margin-bottom: 8px; }
                 }
                 html += kv('Gerätelog', '<a href="/system#geraet">auf der System-Seite</a>');
             } else {
-                html += '<div class="hint">Noch kein Gerät hat sich gemeldet. Sobald der ESP32 das erste Bild bestätigt, steht er hier.</div>';
+                html += '<div class="hint">Noch kein Gerät hat sich gemeldet. So kommt das mitgelieferte ESP32-Panel dazu:</div>'
+                    + '<ol class="setup">'
+                    + '<li>In <span class="mono">esp32/Inkwall/config.private.h</span> das WLAN und <span class="mono">SERVER_BASE_URL "' + esc(location.origin) + '"</span> eintragen.</li>'
+                    + '<li>Firmware bauen und einmal per USB flashen (<a href="https://github.com/N0cky/inkwall/tree/main/esp32/Inkwall" target="_blank" rel="noreferrer">Anleitung</a>), spätere Updates gehen über die Karte „Firmware“.</li>'
+                    + '<li>' + (issues.length ? 'Oben unter „Display“ noch anpassen:' : 'Format und Größe passen schon (BMP, 1200 × 1600).') + '</li>'
+                    + '</ol>' + issueHtml
+                    + '<div class="hint" style="margin-top:8px">Sobald der ESP32 das erste Bild bestätigt, steht er hier.</div>';
             }
             html += kv('Nächstes Aufwachen', 'in ' + esc(ui.mmss(s.next.seconds)) + ' <span class="hint">· ' + esc(s.next.reason) + '</span>');
             html += kv('Aktuelles Bild', esc(s.current.module_name) + ' <span class="hint">um ' + esc(ui.fmtTime(s.current.rendered_at)) + '</span>');

@@ -1,6 +1,7 @@
 services:
   inkwall:
-    build: .
+    # Fertiges Image von GitHub; zum Selberbauen stattdessen `build: .`
+    image: ghcr.io/n0cky/inkwall:latest
     container_name: inkwall
     init: true
     ports:
@@ -12,8 +13,17 @@ services:
       # Optional: Passwort für die Weboberfläche, Token für Firmware und Rückmeldung des Geräts
       # INKWALL_UI_PASSWORD: "…"
       # INKWALL_DEVICE_TOKEN: "…"   # erst setzen, wenn die Firmware mit DEVICE_TOKEN läuft
+      # Besitzer der Dateien in den Volumes (Unraid: 99 / 100), ohne Angabe 1000 / 1000
+      # PUID: "1000"
+      # PGID: "1000"
     volumes:
       - ./config:/config
       - ./data/output:/output
       - ./logs:/logs
     restart: unless-stopped
+    # Das Zugriffsprotokoll enthält jede Abfrage von Gerät und Oberfläche – begrenzen
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

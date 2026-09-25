@@ -154,6 +154,10 @@ der Balken mit "Auf dem Display ausprobieren" einmal zur Probe anzeigen.
 
 ## Erwartetes Serververhalten
 
+Am Server muessen `OUTPUT_FORMAT=bmp` und eine Bildgroesse von 1200 x 1600 eingestellt sein
+(Breite 1600, Hoehe 1200, `DISPLAY_ROTATION=90` – so sind die Standardwerte). Jede andere Groesse
+lehnt die Firmware ab, und mit `png` gibt es kein Panel-Bild. Die Geraet-Seite warnt, wenn das nicht passt.
+
 - `GET /meta.json?sleep=from_meta` liefert mindestens `{"hash": "<32 Hex-Zeichen>", "next_wake_sec": <zahl>}`;
   optional `format`, `epd_url`, `epd_size`, `firmware_version`, `firmware_md5`, `firmware_url`,
   `firmware_force`, `epoch`, `tz_offset_sec`, `clean_due`, `show_offline_test` und

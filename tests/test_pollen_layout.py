@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 import app.config as config
 from app.image_rendering import SPECTRA6_COLORS

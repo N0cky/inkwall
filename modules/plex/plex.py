@@ -10,7 +10,7 @@ import requests
 from PIL import Image
 
 from app.config import get_csv_setting, get_setting
-from app.http_client import HTTP_SESSION, download_image, download_image_cached
+from app.http_client import HTTP_SESSION, download_image_cached
 from app.logger import get_logger
 
 log = get_logger(__name__)

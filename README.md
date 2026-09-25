@@ -10,8 +10,8 @@ It renders active live content like Plex playback or the current Steam game, plu
 
 Supported output modes:
 
+- `BMP` with dithering for Waveshare Spectra 6 E-Ink displays, plus a compact 4-bit format the included ESP32 firmware loads (the default)
 - `PNG` for regular displays or preview workflows
-- `BMP` with dithering for Waveshare Spectra 6 E-Ink displays
 
 ---
 
@@ -41,7 +41,7 @@ Supported output modes:
 - **Dashboard mode** – instead of rotating full-screen modules, stack several of them as tiles in one image (`IDLE_LAYOUT=dashboard`): weather on top, calendar in the middle, garbage or news below. Fewer display refreshes, more information per glance
 - **Gallery** – local image folders as an idle module with random selection, blur background, and optional overlay
 - **Modular architecture** – add new content sources as standalone modules without touching the core framework
-- **Dark and light themes** – optimized for OLED-like displays and Waveshare Spectra 6 E-Ink panels
+- **E-Ink, dark and light themes** – flat Spectra 6 colours for the E-Ink panel (the default), dark and light for regular screens
 - **Web UI** – four pages that follow the user's questions: *Anzeige* (what the display shows, with the programme, switches, order and previews), *Inhalte* (one card per source with its own save button and a connection test), *Gerät* (display and ESP32 status), *System* (events, time zone, backup and restore)
 - **Docker-ready** – container startup via `Dockerfile` and `docker-compose.yml`
 - **WSGI-ready** – production container startup through Gunicorn with a clean runtime bootstrap
@@ -76,7 +76,7 @@ Supported output modes:
 ```bash
 # Clone the repository
 git clone https://github.com/N0cky/inkwall.git
-cd E-Ink
+cd inkwall
 
 # Create and activate a virtual environment
 python -m venv .venv
@@ -91,7 +91,7 @@ mkdir config
 copy config\settings.env.example config\settings.env      # Windows PowerShell / CMD
 # mkdir -p config && cp config/settings.env.example config/settings.env   # Linux / macOS
 
-# Start the server
+# Start the server (another port: set the environment variable PORT)
 python app/server.py
 ```
 
@@ -100,22 +100,18 @@ The web UI is then available at `http://localhost:8787`.
 ### Docker
 
 ```bash
-mkdir config
-copy config\settings.env.example config\settings.env      # Windows
-# mkdir -p config && cp config/settings.env.example config/settings.env   # Linux / macOS
-
-docker compose up --build -d
+docker compose up -d
 ```
 
-The containerized app is also available at `http://localhost:8787`.
+This pulls `ghcr.io/n0cky/inkwall:latest`; the app is then available at `http://localhost:8787`. Without a settings file the defaults fit the 13.3″ Spectra 6 panel with the included firmware; everything else is set in the web UI.
 
 ---
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.12 or newer (the Docker image uses 3.13; CI tests both)
 - pip / venv
-- Optional: an ESP32 using the included firmware sketch in `esp32/`
+- Optional: an ESP32-S3 with the Waveshare 13.3″ Spectra 6 panel and the included firmware in `esp32/Inkwall/`
 
 ---
 
@@ -139,34 +135,30 @@ This keeps the display logic simple while letting the server handle data fetchin
 ### With Docker Compose
 
 ```bash
-# Create the config file
-mkdir config
-copy config\settings.env.example config\settings.env      # Windows
-# mkdir -p config && cp config/settings.env.example config/settings.env   # Linux / macOS
-
-# Build and start the container
-docker compose up --build -d
+docker compose up -d
 ```
 
-The web UI is then available at `http://localhost:8787`.
+The web UI is then available at `http://localhost:8787`. To build the image yourself, replace `image:` with `build: .` in `docker-compose.yml` and run `docker compose up --build -d`.
 
-Persistent directories:
+Persistent directories (the only places the server writes to; the program code in the image is read-only for it):
 
-- `./config` – runtime configuration file
-- `./data/output` – rendered images
+- `./config` – runtime configuration file (`settings.env`, created by the web UI; `config/settings.env.example` shows every key)
+- `./data/output` – rendered images, render history, caches, hosted firmware
 - `./logs` – JSON logs
+
+The container starts as root, takes over these directories and then runs as an unprivileged user. `PUID` and `PGID` set that user's IDs (Unraid: `99` and `100`); without them it is `1000`. The Compose file limits the Docker log to 3 × 10 MB, because the access log contains every request of the device and the web UI.
 
 ### Direct Docker Usage
 
 ```bash
-docker build -t inkwall .
-docker run --rm -p 8787:8787 \
-  -e INKWALL_CONFIG_FILE=/config/settings.env \
+docker run -d --name inkwall -p 8787:8787 \
   -v ./config:/config \
   -v ./data/output:/output \
   -v ./logs:/logs \
-  inkwall
+  ghcr.io/n0cky/inkwall:latest
 ```
+
+The port inside the container is always 8787; map another host port if needed (`-p 8080:8787`).
 
 ### Production Notes
 
@@ -197,50 +189,36 @@ For local development, `python app/server.py` remains the simplest path. In Dock
 
 ## Unraid Deployment
 
-The recommended way to use this project on Unraid is a published container image from GitHub Container Registry.
+The recommended way to use this project on Unraid is the published container image from the GitHub Container Registry:
 
-Planned image format:
+- `ghcr.io/n0cky/inkwall:latest` – the current state of `main`
+- `ghcr.io/n0cky/inkwall:0.2.0` (and `0.2`) – released versions, from Git tags like `v0.2.0`
 
-- `ghcr.io/n0cky/e-ink:latest`
-- `ghcr.io/n0cky/e-ink:0.1.0`
-
-This repository is now prepared for that flow:
-
-- Git tags like `v0.1.0` trigger an automatic Docker publish workflow
-- Images are published to `ghcr.io`
-- Multi-arch builds are prepared for `linux/amd64` and `linux/arm64`
+Images are built for `linux/amd64` and `linux/arm64`, and only after the tests and a trial start of the container have passed.
 
 ### Unraid Container Settings
 
 Typical Unraid mapping:
 
 - Repository:
-  - `ghcr.io/n0cky/e-ink:latest`
+  - `ghcr.io/n0cky/inkwall:latest`
 - Port:
   - `8787` container -> `8787` host
 - Environment:
-  - `INKWALL_CONFIG_FILE=/config/settings.env` (already the image default)
+  - `PUID=99`, `PGID=100` (recommended: files in appdata then belong to `nobody:users` like those of other containers; without them `1000:1000`)
   - `INKWALL_UI_PASSWORD=...` (optional, protects the web UI with Basic Auth)
+  - `INKWALL_DEVICE_TOKEN=...` (optional, see [Security Notes](#security-notes) – set it only after the firmware with the token runs)
   - `INKWALL_GALLERY_ROOTS=/gallery` (optional, limits Gallery folders to the mounted photo share)
 - AppData / volumes:
   - `/mnt/user/appdata/inkwall/config` -> `/config`
   - `/mnt/user/appdata/inkwall/output` -> `/output`
   - `/mnt/user/appdata/inkwall/logs` -> `/logs`
 
-Keep the main runtime configuration in `/config/settings.env`.
+The runtime configuration lives in `/config/settings.env` and is written by the web UI.
 
-### First Release to GHCR
+**Updating:** use *Force Update* on the container (Docker tab, or the container's menu). Changing a variable and pressing *Apply* recreates the container, but does not necessarily pull a newer image.
 
-Once the GitHub repository exists and your first push succeeded:
-
-```bash
-git tag v0.1.0
-git push origin main --tags
-```
-
-After that, GitHub Actions will build and publish the image automatically.
-
-If you want Unraid to pull the image without GitHub authentication, make sure the published GHCR package is set to `public`.
+If Unraid should pull the image without GitHub authentication, the GHCR package has to be `public`.
 
 ---
 
@@ -259,12 +237,11 @@ Recommended setup for all environments:
 
 | Variable | Description | Default |
 |---|---|---|
-| `PORT` | HTTP port for the server | `8787` |
-| `RENDER_WIDTH` | Render width in pixels | `1600` |
-| `RENDER_HEIGHT` | Render height in pixels | `1200` |
-| `DISPLAY_ROTATION` | Rotation: `0`, `90`, `180`, `270` | `0` |
-| `DISPLAY_THEME` | `dark`, `light` or `eink` (flat Spectra 6 colours, no blur or gradients, recommended for the E-Ink display) | `dark` |
-| `OUTPUT_FORMAT` | `png` or `bmp` (Spectra 6) | `png` |
+| `RENDER_WIDTH` | Render width in pixels, before rotation | `1600` |
+| `RENDER_HEIGHT` | Render height in pixels, before rotation | `1200` |
+| `DISPLAY_ROTATION` | Rotation: `0`, `90`, `180`, `270`; `90` and `270` render in portrait. The 13.3″ panel with the included firmware needs 1200 × 1600, i.e. 1600 × 1200 with `90` | `90` |
+| `DISPLAY_THEME` | `eink` (flat Spectra 6 colours, no blur or gradients, for the E-Ink panel), `dark` or `light` (regular screens) | `eink` |
+| `OUTPUT_FORMAT` | `bmp` (Spectra 6 dithering plus the compact panel format the firmware loads) or `png` (regular screens; the firmware then gets no image) | `bmp` |
 | `REFRESH_INTERVAL` | Poll interval in seconds | `60` |
 | `TIMEZONE` | IANA timezone, for example `Europe/Berlin` | `Europe/Berlin` |
 | `NOTIFY_URL` | Notification target: an ntfy topic (`https://ntfy.sh/my-display`), a Discord or Slack webhook, or any URL accepting a text POST. One message when the device has been silent for `NOTIFY_OFFLINE_MINUTES`, one when it is back | `` |
@@ -291,6 +268,8 @@ Recommended setup for all environments:
 | `STEAM_MODULE_ENABLED` | Enable Steam live game detection | `false` |
 
 Module-specific variables such as DWD station, pollen region, or gallery paths are defined by the modules themselves and are also managed through the web UI.
+
+Container environment variables (not in `settings.env`): `INKWALL_UI_PASSWORD`, `INKWALL_DEVICE_TOKEN`, `INKWALL_GALLERY_ROOTS`, `PUID`/`PGID`, and the paths `INKWALL_CONFIG_FILE`, `INKWALL_OUTPUT_DIR`, `INKWALL_LOGS_DIR` (already set in the image). `PORT` only applies to `python app/server.py`; in the container the port is always 8787.
 
 When settings are changed through the web UI, the application writes them back to the active config file path.
 
@@ -336,6 +315,14 @@ Inkwall/
 ├── app/                        # Framework core (no module-specific code)
 │   ├── server.py               # Flask server, render loop, and API routes
 │   ├── config.py               # Configuration, RuntimeConfig, and env-file I/O
+│   ├── display_api.py          # JSON for the web UI: programme, cards, probe, export/import
+│   ├── dashboard.py            # Dashboard mode: tiles stacked in one image
+│   ├── schedule.py             # Time windows (SCHEDULE_WINDOWS), DST-safe wake times
+│   ├── device.py               # Device acknowledgements, firmware hosting, panel cleaning
+│   ├── monitoring.py           # Acknowledgement history, statistics, /metrics
+│   ├── notifications.py        # Discord, ntfy and Slack messages (outage, firmware, reports)
+│   ├── epd_format.py           # Compact 4-bit panel format (/current.epd)
+│   ├── ics.py                  # ICS parsing for Kalender and Müllabfuhr (recurrences, time zones)
 │   ├── logger.py               # JSONL + console logging with secret masking
 │   ├── module_base.py          # InkwallModule base class for all modules
 │   ├── module_registry.py      # Module auto-discovery and hot reload
@@ -368,6 +355,15 @@ Inkwall/
 │   │   ├── __init__.py         # Müllabfuhr module (priority 105)
 │   │   ├── data_source.py      # ICS sources, {year} handling, bin colour mapping (parsing: app/ics.py)
 │   │   └── renderer.py         # Next pickup hero + upcoming list
+│   ├── departures/
+│   │   ├── __init__.py         # Abfahrten module
+│   │   ├── data_source.py      # transport.rest client, stop lookup
+│   │   └── renderer.py         # Departure board
+│   ├── fuel_prices/
+│   │   ├── __init__.py         # Tankpreise module
+│   │   ├── data_source.py      # Tankerkönig client, stations
+│   │   ├── history.py          # Own price history (curves, profiles, lows)
+│   │   └── renderer.py         # Price board and charts
 │   ├── gallery/
 │   │   ├── __init__.py         # Module entry point
 │   │   ├── data_source.py      # File discovery and image selection
@@ -382,11 +378,16 @@ Inkwall/
 ├── CHANGELOG.md                # Release history
 ├── CONTRIBUTING.md             # Contribution guidelines
 ├── Dockerfile                  # Container build definition
-├── docker-compose.yml          # Local container startup
+├── entrypoint.sh               # PUID/PGID, volume ownership, drop root
+├── docker-compose.yml          # Container startup with the published image
+├── ruff.toml                   # Lint rules for CI (syntax errors, undefined/unused names)
 ├── wsgi.py                     # Gunicorn/WSGI entry point
-├── templates/                  # Jinja2 HTML templates
+├── templates/                  # Jinja2 HTML templates (Anzeige, Inhalte, Gerät, System)
+├── static/                     # ui.js, fields.js, logo and icons
 ├── font/                       # Font Awesome files for weather icons
-├── esp32/                      # Arduino sketch for the E-Ink client
+├── esp32/Inkwall/              # Arduino sketch for the E-Ink client (own README)
+├── docs/modules.md             # How to write a module
+├── tests/                      # Unit and smoke tests
 ├── config/
 │   ├── settings.env.example    # Example runtime configuration
 │   └── settings.env            # Local runtime configuration (do not commit)
@@ -554,9 +555,9 @@ module = MyModule()   # must be exported as "module"
 
 ### Step 3 – Enable the Module
 
-1. **Restart the server** or click **"Rescan modules"** in the web UI.
-2. Enable the module under **Settings -> Core Settings -> Idle Modules**.
-3. Module-specific settings will appear automatically in their own section.
+1. **Restart the server** or click **"Neu laden"** under *Module neu laden* on the *System* page.
+2. Switch the module on in the programme on the *Anzeige* page.
+3. Its settings appear automatically as a card on the *Inhalte* page.
 
 ---
 
@@ -599,7 +600,13 @@ These helpers from the framework are available inside modules:
 
 ## ESP32 Client
 
-The sketch in `esp32/Inkwall/` connects to the server over Wi-Fi, periodically checks `/meta.json`, and downloads the image only when the hash changed. The suggested sleep interval also comes directly from the server through `next_wake_sec`.
+The sketch in `esp32/Inkwall/` (ESP32-S3 with the Waveshare 13.3″ Spectra 6 panel) connects to the server over Wi-Fi, periodically checks `/meta.json`, and downloads the image only when the hash changed. The suggested sleep interval also comes directly from the server through `next_wake_sec`.
+
+Connecting a panel:
+
+1. Create `esp32/Inkwall/config.private.h` (not committed) with your Wi-Fi, `SERVER_BASE_URL` (how the ESP32 reaches the server, e.g. `http://192.168.178.6:8787`) and optionally `DEVICE_TOKEN`; everything else comes from `config.example.h`.
+2. Build and flash once over USB – see [`esp32/Inkwall/README.md`](esp32/Inkwall/README.md). Later updates go over the air from the *Gerät* page.
+3. On the server, keep the defaults `OUTPUT_FORMAT=bmp` and 1200 × 1600 (1600 × 1200 with `DISPLAY_ROTATION=90`): the firmware refuses any other size, and with `png` there is no panel image. The *Gerät* page shows the address to enter as long as no device has reported, and warns when format or size do not fit.
 
 `next_wake_sec` is intentionally modular:
 
@@ -612,7 +619,7 @@ This is especially relevant for `Gallery` when a custom image change interval is
 
 Since firmware 1.1.0 the device also:
 
-- prefers the compact image `/current.epd` (4 bits per pixel, 960 KB) and writes it straight to the panel, with the 24-bit BMP as fallback
+- loads the compact image `/current.epd` (4 bits per pixel, 960 KB) and writes it straight to the panel; the 24-bit `/current.bmp` is only used with servers that do not offer it
 - reports its health with every acknowledgement (firmware version, RSSI, boot count, free PSRAM, download and refresh times, last error) and sends the serial log of the cycle, both visible on the *Gerät* and *System* pages
 - updates itself over the air: upload the `.bin` from the Arduino build on the *Gerät* page, the device compares the version in `/meta.json` with its own on the next wake-up, flashes the second app partition (MD5-checked) and reboots. The new firmware is only marked valid after a successful cycle, otherwise the bootloader rolls back.
 
@@ -620,22 +627,14 @@ Since firmware 1.1.0 the device also:
 
 ## GitHub
 
-The repository is now prepared for a clean GitHub setup with:
-
-- `.gitignore` for local runtime data and development artifacts
-- `.gitattributes` for consistent line endings and binary files
-- `config/settings.env.example` as a starting configuration
-- `LICENSE` (Non-Commercial)
-- `CHANGELOG.md` for release history
-- `CONTRIBUTING.md` for development and pull request guidance
-- GitHub Actions CI in `.github/workflows/ci.yml`
-- Docker publish workflow in `.github/workflows/docker-publish.yml`
-
-The CI currently checks:
-
-- Python bytecode compilation
-- Unit tests
-- Template smoke test
+- `config/settings.env.example` – every setting with its default
+- `LICENSE` (Non-Commercial), `CHANGELOG.md`, `CONTRIBUTING.md`
+- `.github/workflows/ci.yml` – runs on every push and pull request:
+  - lint with ruff (syntax errors, undefined and unused names)
+  - byte-compilation, unit tests and a template smoke test on Python 3.12 and 3.13
+  - Docker build and a trial start of the container as on Unraid (`PUID=99`, `PGID=100`, empty volumes): health check, web UI, file ownership, read-only program code
+- `.github/workflows/docker-publish.yml` – on Git tags `v*` or started by hand: runs the CI above first, then builds for `linux/amd64` and `linux/arm64` and pushes to `ghcr.io/n0cky/inkwall`
+- `app/requirements.txt` pins every package, including indirect ones, so every build gets the same versions
 
 ---
 

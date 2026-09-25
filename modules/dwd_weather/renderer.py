@@ -1199,7 +1199,6 @@ def draw_compact_forecast_strip(img, bounds, forecast_days, day_font, temp_font,
         return max(1, int(v * scale))
 
     left, top, right, bottom = bounds
-    h = bottom - top
     count = len(forecast_days)
     gap = px(10)
     card_w = int((right - left - gap * (count - 1)) / count)
@@ -1727,7 +1726,6 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
     panel_right  = rw - px(50)
     panel_top    = px(134)
     panel_bottom = rh - px(18)
-    panel_w      = panel_right - panel_left
     inset        = px(42)
 
     apply_glass_panel(img, (panel_left, panel_top, panel_right, panel_bottom),

@@ -126,8 +126,10 @@ SETTINGS_FIELDS: list[dict] = [
         "type":    "select",
         "section": "framework",
         "wide":    False,
+        "default": "90",
         "options": [("0", "0°"), ("90", "90°"), ("180", "180°"), ("270", "270°")],
-        "help":    "90 und 270 rendern im Hochformat. 180 und 270 sind auf dem Kopf.",
+        "help":    ("90 und 270 rendern im Hochformat. 180 und 270 sind auf dem Kopf. "
+                    "Das 13,3″-Panel mit der mitgelieferten Firmware braucht 1200 × 1600: Breite 1600, Höhe 1200, 90°."),
     },
     {
         "name":    "DISPLAY_THEME",
@@ -135,6 +137,7 @@ SETTINGS_FIELDS: list[dict] = [
         "type":    "select",
         "section": "framework",
         "wide":    True,
+        "default": "eink",
         "options": [
             ("dark",  "🌑 Dark – verschwommenes Artwork, weißer Text"),
             ("light", "☀️ Light – heller Hintergrund, weiche Verläufe"),
@@ -153,13 +156,14 @@ SETTINGS_FIELDS: list[dict] = [
         "type":    "select",
         "section": "framework",
         "wide":    True,
+        "default": "bmp",
         "options": [
             ("png", "PNG – Vollfarb, für HDMI- oder Web-Displays"),
             ("bmp", "BMP – Spectra 6 Dithering, für Waveshare 13,3″ E-Ink-Farbdisplay"),
         ],
         "help": (
             "PNG: Vollfarb-RGB. BMP: Floyd-Steinberg-Dithering auf 6 Spectra-Farben "
-            "für das Waveshare Spectra 6 E-Ink-Display."
+            "für das Waveshare Spectra 6 E-Ink-Display – die mitgelieferte Firmware braucht BMP."
         ),
     },
     {
@@ -580,14 +584,15 @@ class RuntimeConfig:
     base_render_width:  int  = 1600
     base_render_height: int  = 1200
     refresh_interval:   int  = 60
-    display_rotation:   int  = 0
-    display_theme:      str  = "dark"
-    output_format:      str  = "png"
+    # Standard = das 13,3″-Spectra-6-Panel mit der mitgelieferten Firmware: 1200 × 1600, BMP/EPD, E-Ink-Farben
+    display_rotation:   int  = 90
+    display_theme:      str  = "eink"
+    output_format:      str  = "bmp"
     show_render_time:   bool = False
     panel_clean_interval_days: int = 14
     panel_clean_hour:   int  = 3
-    render_width:       int  = 1600
-    render_height:      int  = 1200
+    render_width:       int  = 1200
+    render_height:      int  = 1600
     timezone:           str  = "Europe/Berlin"
     # Idle-Verwaltung
     idle_module_ids:               tuple = ()
@@ -871,12 +876,12 @@ def apply_runtime_config(settings: dict[str, str] | None = None) -> None:
     # 90°/270° wird die Höhe zur Breite – eine ungerade Zahl ließe jeden Render scheitern
     base_w  -= base_w % 2
     base_h  -= base_h % 2
-    rotation = parse_display_rotation(get_env_value(settings, "DISPLAY_ROTATION", "0"))
+    rotation = parse_display_rotation(get_env_value(settings, "DISPLAY_ROTATION", "90"))
     render_w, render_h = get_effective_render_size(base_w, base_h, rotation)
 
     idle_modules_raw = get_env_value(settings, "IDLE_MODULES", "")
     refresh_interval = _parse_int(settings, "REFRESH_INTERVAL", 60, 10, 3600)
-    output_format = get_env_value(settings, "OUTPUT_FORMAT", "png")
+    output_format = get_env_value(settings, "OUTPUT_FORMAT", "bmp")
     show_render_time = parse_bool_env(settings.get("SHOW_RENDER_TIME"), False)
     panel_clean_interval_days = _parse_int(settings, "PANEL_CLEAN_INTERVAL_DAYS", 14, 0, 365)
     panel_clean_hour = _parse_int(settings, "PANEL_CLEAN_HOUR", 3, 0, 23)
@@ -887,9 +892,9 @@ def apply_runtime_config(settings: dict[str, str] | None = None) -> None:
     notify_daily_hour = _parse_int(settings, "NOTIFY_DAILY_HOUR", 7, 0, 23)
     notify_base_url = get_env_value(settings, "NOTIFY_BASE_URL", "").strip().rstrip("/")
     notify_avatar_url = get_env_value(settings, "NOTIFY_AVATAR_URL", "").strip()
-    display_theme = get_env_value(settings, "DISPLAY_THEME", "dark").strip().lower()
+    display_theme = get_env_value(settings, "DISPLAY_THEME", "eink").strip().lower()
     if display_theme not in AVAILABLE_THEMES:
-        display_theme = "dark"
+        display_theme = "eink"
     timezone_name = get_env_value(settings, "TIMEZONE", "Europe/Berlin")
     idle_module_ids = parse_idle_module_ids(idle_modules_raw)
     idle_rotation_seconds = _parse_int(settings, "IDLE_MODULE_ROTATION_SECONDS", 120, 30, 3600)

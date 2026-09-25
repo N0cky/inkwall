@@ -17,7 +17,6 @@ import os
 import re
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 from app.config import DATA_DIR
 from app.logger import LOGS_DIR, get_logger

@@ -19,11 +19,12 @@ Thanks for taking the time to contribute to Inkwall.
 
 ## Before Opening a PR
 
-Please make sure the following pass locally:
+Please make sure the following pass locally (CI runs the same on Python 3.12 and 3.13, then builds the image and starts it as on Unraid):
 
-1. `python -m compileall -q app modules tests wsgi.py`
-2. `python -m unittest discover -s tests -t .` (the `-t .` matters: it loads `tests/` as a package so the test isolation in `tests/__init__.py` applies and your local `config/settings.env` is never touched)
-3. Template smoke test:
+1. `ruff check app modules tests wsgi.py` (`pip install ruff`; `ruff.toml` limits it to syntax errors and undefined or unused names)
+2. `python -m compileall -q app modules tests wsgi.py`
+3. `python -m unittest discover -s tests -t .` (the `-t .` matters: it loads `tests/` as a package so the test isolation in `tests/__init__.py` applies and your local `config/settings.env` is never touched)
+4. Template smoke test:
 
 ```bash
 python -c "from app.server import app; [app.jinja_env.get_template(name) for name in ['base.html','anzeige.html','inhalte.html','geraet.html','system.html']]; print('TEMPLATES_OK')"
@@ -35,6 +36,7 @@ python -c "from app.server import app; [app.jinja_env.get_template(name) for nam
 - Avoid committing generated files, logs, caches, local secrets, or virtualenv contents.
 - If you add a new module, also update `docs/modules.md` and `config/settings.env.example` when relevant.
 - If behavior changes are user-facing, add a short note to `CHANGELOG.md`.
+- `app/requirements.txt` pins every package, including the indirect ones, so each build gets the same versions. To update: install the direct packages (top block) into a fresh virtual environment, run the tests, and copy the result of `pip freeze` into the second block.
 
 ## Reporting Issues
 

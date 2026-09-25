@@ -25,7 +25,6 @@ import threading
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 from app import ics
 from app.config import DATA_DIR, WEEKDAYS_DE_LONG, get_int_setting, get_setting, now_local

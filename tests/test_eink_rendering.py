@@ -11,7 +11,6 @@ Tests fürs Rendern auf das Panel:
 
 from __future__ import annotations
 
-import io
 import tempfile
 import time
 import unittest

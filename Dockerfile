@@ -2,7 +2,7 @@ FROM python:3.13-slim
 
 LABEL org.opencontainers.image.title="Inkwall" \
       org.opencontainers.image.description="Self-hosted image server for E-Ink now playing and idle dashboards." \
-      org.opencontainers.image.licenses="E-Ink Now Playing Display License (Non-Commercial)"
+      org.opencontainers.image.licenses="LicenseRef-Inkwall-NonCommercial"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -22,11 +22,13 @@ RUN adduser --disabled-password --gecos "" appuser
 COPY app/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
 
+# Der Programmcode gehört root und bleibt für den laufenden Server schreibgeschützt;
+# schreiben darf er nur in /output, /logs und /config (Volumes)
 COPY . /app
 
 RUN mkdir -p /output /logs /config \
-    && chown -R appuser:appuser /app /output /logs /config \
-    && chmod +x /app/entrypoint.sh
+    && chown appuser:appuser /output /logs /config \
+    && chmod 755 /app/entrypoint.sh
 
 EXPOSE 8787
 

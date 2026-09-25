@@ -9,7 +9,7 @@ from datetime import date, datetime
 
 from PIL import Image
 
-from app.config import WEEKDAYS_DE_LONG, format_date_long, format_weekday_short
+from app.config import WEEKDAYS_DE_LONG, format_date_long
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
 from app.text_rendering import draw_lines, ellipsize, fit_wrapped_text, new_draw
@@ -164,7 +164,6 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
     font_heading  = load_font(px(30), True)
     font_time     = load_font(px(26), True)
     font_event    = load_font(px(32), False)
-    font_location = load_font(px(22), False)
     font_more     = load_font(px(22), False)
     time_col_w    = px(190)
     bar_w         = px(10)

@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
@@ -19,7 +18,6 @@ from PIL import Image
 import app.config as config
 import app.server as server
 from app.module_base import InkwallModule
-from app.schedule import ALL_DAYS, Window
 
 
 class _Tile(InkwallModule):

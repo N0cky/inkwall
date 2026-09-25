@@ -16,3 +16,8 @@ bin
 dotenv
 python_dotenv-*.dist-info
 .env
+
+# Zur Laufzeit nicht gebraucht
+esp32
+docs
+*.md

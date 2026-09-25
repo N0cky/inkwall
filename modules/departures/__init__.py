@@ -251,7 +251,7 @@ class DeparturesModule(InkwallModule):
         return {"ok": True, "enabled": self.is_enabled(env), "stops": len(parse_stops(env.get("DEPARTURES_STOPS", "")))}
 
     def validate_settings(self, updates: dict[str, str], env: dict[str, str]) -> list[str]:
-        from .data_source import MAX_STOPS, parse_stops
+        from .data_source import MAX_STOPS
         errors: list[str] = []
         raw = env.get("DEPARTURES_STOPS", "").strip()
         idle = {x.strip() for x in env.get("IDLE_MODULES", "").split(",") if x.strip()}

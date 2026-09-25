@@ -1,0 +1,6 @@
+# Nur, was echte Fehler findet: Syntaxfehler, undefinierte und ungenutzte Namen (Pyflakes).
+# Keine Stilregeln – der Code folgt seinem eigenen Stil (Einzeiler, ausgerichtete Zuweisungen).
+target-version = "py312"
+
+[lint]
+select = ["E9", "F"]
