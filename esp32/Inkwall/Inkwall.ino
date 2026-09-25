@@ -40,6 +40,7 @@
 #include <Preferences.h>
 #include <FFat.h>
 #include <ctype.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
@@ -57,42 +58,105 @@
 // Der Server liest die Version aus dem Marker in der .bin (Gerät-Seite → Firmware).
 // Der Marker wird im Boot-Log referenziert, sonst wirft der Linker ihn weg.
 #ifdef OTA_SELFTEST_FAIL
-#define FIRMWARE_VERSION "1.2.3-selftest"
+#define FIRMWARE_VERSION "1.3.0-selftest"
 #else
-#define FIRMWARE_VERSION "1.2.3"
+#define FIRMWARE_VERSION "1.3.0"
 #endif
 #define FW_MARKER_PREFIX "INKWALL_FW_VERSION="
 const char FW_VERSION_MARKER[] __attribute__((used)) = FW_MARKER_PREFIX FIRMWARE_VERSION;
 static const char* firmwareVersionFromMarker() { return FW_VERSION_MARKER + sizeof(FW_MARKER_PREFIX) - 1; }
 
-// ─── RTC-Memory (überlebt Deep Sleep, gleiche Firmware) ──────────────────────
-RTC_DATA_ATTR char     storedHash[33] = {0};
-RTC_DATA_ATTR uint32_t bootCount      = 0;
-RTC_DATA_ATTR char     lastError[96]  = {0};   // Fehler eines Zyklus ohne ACK (z. B. WLAN weg)
-RTC_DATA_ATTR uint32_t failCount      = 0;     // Zyklen in Folge ohne Serverkontakt
-RTC_DATA_ATTR int64_t  firstFailEpoch = 0;     // UTC-Sekunden des ersten Fehlzyklus (0 = Uhr unbekannt)
-RTC_DATA_ATTR uint8_t  failWasWifi    = 0;
-RTC_DATA_ATTR uint8_t  bannerShown    = 0;     // Offline-Balken steht auf dem Display
-RTC_DATA_ATTR uint8_t  setupShown     = 0;
-RTC_DATA_ATTR int32_t  tzOffsetSec    = 0;     // vom Server, für "seit HH:MM"
+// ─── Zustand über Deep Sleep UND Neustarts ───────────────────────────────────
+// RTC_DATA_ATTR wird bei jedem Reset außer dem Aufwachen neu initialisiert: nach
+// einem Watchdog-Reset oder Absturz waren Hash, Fehlerzähler und "seit HH:MM"
+// weg (unnötiger Bildaufbau, Offline-Balken begann von vorn, Fehler verloren).
+// RTC_NOINIT überlebt jeden Reset außer Stromausfall; Kennung und Prüfsumme
+// erkennen den Datenmüll nach dem Einschalten oder einer neuen Firmware.
+struct PersistState {
+    uint32_t magic;
+    char     storedHash[33];     // Hash des Bilds auf dem Panel ("" = unbekannt/Statusbild)
+    char     failedHash[33];     // Bild, dessen Anzeige zuletzt scheiterte …
+    uint8_t  imageFails;         // … so oft in Folge
+    uint8_t  failWasWifi;
+    uint8_t  bannerShown;        // Offline-Balken steht auf dem Display
+    uint8_t  setupShown;
+    uint32_t bootCount;
+    uint32_t failCount;          // Zyklen in Folge ohne Serverkontakt
+    int64_t  firstFailEpoch;     // UTC-Sekunden des ersten Fehlzyklus (0 = Uhr unbekannt)
+    int32_t  tzOffsetSec;        // vom Server, für "seit HH:MM"
+    char     lastError[96];      // Fehler eines Zyklus ohne ACK (z. B. WLAN weg)
+    uint32_t crc;
+};
+static const uint32_t PERSIST_MAGIC = 0x494E4B33;   // "INK3"
+RTC_NOINIT_ATTR static PersistState g_persist;
+static char     (&storedHash)[33]  = g_persist.storedHash;
+static char     (&failedHash)[33]  = g_persist.failedHash;
+static char     (&lastError)[96]   = g_persist.lastError;
+static uint8_t&  imageFails        = g_persist.imageFails;
+static uint32_t& bootCount         = g_persist.bootCount;
+static uint32_t& failCount         = g_persist.failCount;
+static int64_t&  firstFailEpoch    = g_persist.firstFailEpoch;
+static uint8_t&  failWasWifi       = g_persist.failWasWifi;
+static uint8_t&  bannerShown       = g_persist.bannerShown;
+static uint8_t&  setupShown        = g_persist.setupShown;
+static int32_t&  tzOffsetSec       = g_persist.tzOffsetSec;
+
+static uint32_t persistChecksum() {
+    const uint8_t* p = (const uint8_t*)&g_persist;
+    uint32_t h = 2166136261u;                              // FNV-1a
+    for (size_t i = 0; i < offsetof(PersistState, crc); i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+// Nach jeder Änderung aufrufen: stimmt die Prüfsumme nach einem Absturz nicht,
+// gilt der ganze Zustand als verloren (wie früher nach jedem Reset).
+static void persistSave() {
+    g_persist.magic = PERSIST_MAGIC;
+    g_persist.crc = persistChecksum();
+}
+
+// true = Zustand übernommen, false = frisch angelegt (Stromausfall, neue Firmware)
+static bool persistLoad() {
+    if (g_persist.magic == PERSIST_MAGIC && g_persist.crc == persistChecksum()) {
+        g_persist.storedHash[32] = 0;
+        g_persist.failedHash[32] = 0;
+        g_persist.lastError[95] = 0;
+        return true;
+    }
+    memset(&g_persist, 0, sizeof(g_persist));
+    persistSave();
+    return false;
+}
 
 static const uint32_t OFFLINE_AFTER_FAILS = 3;         // 3 × 5 min = 15 min
 static const int64_t  EPOCH_KNOWN_MIN = 1600000000LL;  // Uhrzeiten davor gelten als "nicht gestellt"
 static const char*    LAST_IMAGE_PATH = "/last.epd";   // wie /current.epd (Header + Nutzdaten)
+static const char*    LAST_IMAGE_TMP  = "/last.tmp";   // erst hierhin, dann umbenennen
 static const char*    LAST_META_PATH  = "/last.txt";   // "hash\nepoch\n"
+static const char*    SHOWN_PATH      = "/shown.txt";  // Hash des Bilds auf dem Panel ("" = Statusbild)
 
 // ─── OTA-Gedächtnis im Flash (NVS) ───────────────────────────────────────────
 // Rollback-Schutz in der Firmware selbst (der Arduino-Bootloader lässt eine
 // neue Firmware nicht im Prüfzustand, siehe Gerätelog "valid" direkt nach OTA):
-//   - vor dem Neustart in die neue Firmware: pendingVerify=1, Zielversion merken
-//   - die neue Firmware zählt ihre Starts; erreicht sie den Server, ist sie bestätigt
-//   - zwei Starts ohne Serverkontakt → Update.rollBack() auf die alte Partition
-//   - die alte Firmware sieht rolledBack, meldet es und lädt diese Version nicht erneut
+//   - vor dem Einspielen: pendingVerify=1, Zielversion, MD5 und Zielpartition merken
+//   - die neue Firmware zählt ihre Starts; bestätigt ist sie erst nach einem
+//     vollständigen Zyklus (Bild angezeigt oder unverändert, Rückmeldung angekommen)
+//     – eine Firmware, die beim Bildaufbau hängt oder abstürzt, wird so erkannt
+//   - drei Starts ohne erfolgreichen Zyklus → Update.rollBack() auf die alte Partition
+//   - die alte Firmware sieht rolledBack, meldet es und lädt genau diese Datei nicht erneut
+//   - läuft nach einem Neustart gar nicht die Zielpartition (Strom weg mitten im
+//     Update), ist nichts zu prüfen
+//   - scheitert das Einspielen selbst, höchstens OTA_MAX_TRIES Versuche je Datei
 // Bewusst NVS statt RTC-Speicher: RTC-Variablen liegen je Firmware-Build an anderen
 // Adressen, die neue Firmware würde die Notiz der alten nicht finden. NVS ist
 // adressunabhängig und überlebt auch Stromausfall.
 struct OtaMemory {
     char     targetVersion[32];
+    char     targetMd5[33];
+    char     targetPart[17];
+    char     tryId[48];          // MD5 (oder Version) der zuletzt versuchten Datei
+    uint8_t  tries;              // … so oft ohne Erfolg versucht
+    int64_t  triedAt;            // UTC-Sekunden des letzten Versuchs (0 = unbekannt)
     uint8_t  pendingVerify;
     uint8_t  failedBoots;
     uint8_t  rolledBack;
@@ -100,12 +164,19 @@ struct OtaMemory {
 };
 static OtaMemory otaMemory;
 static const char* OTA_NVS_NAMESPACE = "plexeink";   // bewusst der alte Name: sonst vergisst das Gerät sein OTA-Gedächtnis
+static const uint8_t OTA_MAX_TRIES = 3;
+static const int64_t OTA_RETRY_AFTER_SEC = 24 * 3600;  // danach wieder erlaubt (z. B. WLAN war nur schwach)
 
 static void otaMemoryLoad() {
     memset(&otaMemory, 0, sizeof(otaMemory));
     Preferences prefs;
     if (!prefs.begin(OTA_NVS_NAMESPACE, true)) return;      // noch nie geschrieben
     prefs.getString("target", otaMemory.targetVersion, sizeof(otaMemory.targetVersion));
+    prefs.getString("t_md5", otaMemory.targetMd5, sizeof(otaMemory.targetMd5));
+    prefs.getString("t_part", otaMemory.targetPart, sizeof(otaMemory.targetPart));
+    prefs.getString("try_id", otaMemory.tryId, sizeof(otaMemory.tryId));
+    otaMemory.tries            = prefs.getUChar("tries", 0);
+    otaMemory.triedAt          = prefs.getLong64("tried_at", 0);
     otaMemory.pendingVerify    = prefs.getUChar("pending", 0);
     otaMemory.failedBoots      = prefs.getUChar("fails", 0);
     otaMemory.rolledBack       = prefs.getUChar("rolled", 0);
@@ -117,11 +188,27 @@ static void otaMemorySave() {
     Preferences prefs;
     if (!prefs.begin(OTA_NVS_NAMESPACE, false)) { Serial.println("[NVS] nicht beschreibbar"); return; }
     prefs.putString("target", otaMemory.targetVersion);
+    prefs.putString("t_md5", otaMemory.targetMd5);
+    prefs.putString("t_part", otaMemory.targetPart);
+    prefs.putString("try_id", otaMemory.tryId);
+    prefs.putUChar("tries", otaMemory.tries);
+    prefs.putLong64("tried_at", otaMemory.triedAt);
     prefs.putUChar("pending", otaMemory.pendingVerify);
     prefs.putUChar("fails", otaMemory.failedBoots);
     prefs.putUChar("rolled", otaMemory.rolledBack);
     prefs.putUChar("reported", otaMemory.rollbackReported);
     prefs.end();
+}
+
+// "1.10.2" > "1.9.9"; Anhänge wie "-selftest" zählen nicht (gleich = nicht neuer)
+static int compareVersions(const char* a, const char* b) {
+    int va[3] = {0, 0, 0}, vb[3] = {0, 0, 0};
+    sscanf(a ? a : "", "%d.%d.%d", &va[0], &va[1], &va[2]);
+    sscanf(b ? b : "", "%d.%d.%d", &vb[0], &vb[1], &vb[2]);
+    for (int i = 0; i < 3; i++) {
+        if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
+    }
+    return 0;
 }
 
 // Falls der Bootloader doch einmal den Prüfzustand nutzt: nicht automatisch bestätigen,
@@ -137,10 +224,14 @@ static const size_t   DEVICE_LOG_MAX_CHARS = 3000;
 struct Meta {
     String hash;
     uint32_t nextWakeSec = POLL_FALLBACK_SEC;
+    String format;                 // Ausgabeformat des Servers (bmp | png)
     String epdUrl;
+    uint32_t epdSize = 0;          // Dateigröße des kompakten Bilds laut Server
     String firmwareVersion;
     String firmwareMd5;
     String firmwareUrl;
+    bool firmwareForce = false;    // auch einspielen, wenn nicht neuer (Downgrade, Test-Build)
+    bool sleepFromMeta = false;    // Server rechnet damit, dass das Gerät die Zeit ab meta.json abzieht
     int64_t epoch = 0;
     int32_t tzOffsetSec = 0;
     bool cleanDue = false;
@@ -149,6 +240,7 @@ struct Meta {
 
 static String   g_log;                 // Logzeilen dieses Zyklus (gehen mit dem ACK zum Server)
 static uint32_t g_cycleStart = 0;
+static uint32_t g_metaAtMs = 0;        // millis() beim Eintreffen von /meta.json (0 = noch nicht)
 static uint32_t g_downloadMs = 0;
 static uint32_t g_refreshMs  = 0;
 static String   g_imageFormat;
@@ -156,16 +248,17 @@ static String   g_error;
 static uint8_t  g_cleaned = 0;
 static uint32_t g_offlineSeconds = 0;
 static bool     g_storageOk = false;
+static bool     g_panelFailed = false; // Panel hat nicht geantwortet (BUSY) – zählt gegen eine neue Firmware
 
 // ─── Vorwärtsdeklarationen ───────────────────────────────────────────────────
 void     logf(const char* fmt, ...);
 bool     connectWiFi();
-bool     httpBegin(HTTPClient& http, const String& url);
-String   httpGetString(const String& url);
+bool     httpBegin(HTTPClient& http, const String& url, uint32_t timeoutMs);
+String   httpGetString(const String& url, uint32_t timeoutMs = HTTP_SHORT_TIMEOUT_MS);
 bool     httpGetBinary(const String& url, uint8_t* buf, size_t bufSize, size_t& outLen);
-bool     httpPostJson(const String& url, const String& body, int& outCode);
+bool     httpPostJson(const String& url, const String& body, int& outCode, uint32_t timeoutMs = HTTP_SHORT_TIMEOUT_MS);
 bool     fetchMeta(Meta& meta);
-bool     performOta(const Meta& meta);
+bool     performOta(const Meta& meta, const String& tryId);
 bool     fetchAndDisplayEpd(const String& url, const char* hash);
 bool     fetchAndDisplayBmp(const char* hash);
 bool     sendAck(const char* result, const char* hash, const char* fwTarget = nullptr);
@@ -180,31 +273,42 @@ bool     parseBmpHeader(const uint8_t* buf, size_t bufLen,
                         int32_t& height, uint16_t& bpp, uint32_t& rowStride);
 static void setError(const char* text);
 static const char* wakeReasonText();
+static const char* resetReasonText();
 static String jsonEscape(const String& in);
 static void onCycleFailed(bool wifiFailed);
 static void showOfflineBanner(bool wifiFailed, bool test);
 static void showSetupPage();
-static void runCleanCycle();
+static bool runCleanCycle();
 static void saveLastImage(const uint8_t* payload, const char* hash);
+static void rememberShown(const char* hash);
+static String readShown();
 static String localTimeText(int64_t epochUtc);
 static int64_t nowEpoch();
+static bool isHexHash(const String& s);
+static void confirmFirmware();
+static void feedWatchdog();
+static void finishCycle(const char* result, uint32_t sleepSec);
 
 // ════════════════════════════════════════════════════════════════════════════
 void setup() {
     Serial.begin(SERIAL_BAUD);
     delay(500);
     g_cycleStart = millis();
+    bool persisted = persistLoad();
     bootCount++;
+    persistSave();
 
-    // Watchdog: ein Zyklus dauert normal 35 s, mit Reinigung 90 s. Haengt etwas
-    // laenger als 5 Minuten (Panel, Flash, Netz), startet der Chip neu statt
-    // fuer immer wach zu bleiben.
+    // Watchdog: haengt eine Phase (WLAN, Download, Panel, Flash) laenger als
+    // 5 Minuten, startet der Chip neu statt fuer immer wach zu bleiben. Zwischen
+    // den Phasen wird er gefuettert, das Panel meldet sich selbst per BUSY-Timeout.
     {
         esp_task_wdt_config_t wdt = { .timeout_ms = 300000, .idle_core_mask = 0, .trigger_panic = true };
         esp_task_wdt_reconfigure(&wdt);
         esp_task_wdt_add(NULL);
     }
-    logf("== Inkwall %s Boot #%lu (%s) ==", firmwareVersionFromMarker(), (unsigned long)bootCount, wakeReasonText());
+    logf("== Inkwall %s Boot #%lu (Wecken: %s, Start: %s) ==", firmwareVersionFromMarker(), (unsigned long)bootCount,
+         wakeReasonText(), resetReasonText());
+    if (!persisted) logf("[RTC] Kein Zustand aus dem letzten Lauf (Stromausfall oder neue Firmware)");
     logf("PSRAM frei: %u KB", heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
     {
         // Welcher App-Slot laeuft, und in welchem OTA-Zustand sind beide Slots?
@@ -232,24 +336,36 @@ void setup() {
 
     // ── Frisch per OTA geflasht? Starts zählen, notfalls zurückrollen ────────
     if (otaMemory.pendingVerify) {
-        otaMemory.failedBoots++;
-        if (otaMemory.failedBoots > 2) {
-            logf("[OTA] %s hat den Server zweimal nicht erreicht -> Rollback", FIRMWARE_VERSION);
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        if (otaMemory.targetPart[0] && running && strcmp(running->label, otaMemory.targetPart) != 0) {
+            // Strom weg oder Fehler mitten im Einspielen: die alte Firmware laeuft weiter
+            logf("[OTA] Update auf %s ist nicht aktiv geworden (laeuft %s mit %s) - nichts zu pruefen",
+                 otaMemory.targetPart, running->label, FIRMWARE_VERSION);
             otaMemory.pendingVerify = 0;
             otaMemory.failedBoots = 0;
-            otaMemory.rolledBack = 1;
-            otaMemory.rollbackReported = 0;
+            otaMemory.targetPart[0] = 0;
             otaMemorySave();
-            if (Update.canRollBack() && Update.rollBack()) {
-                Serial.flush();
-                delay(200);
-                ESP.restart();
-            }
-            logf("[OTA] Rollback nicht moeglich - keine bootfaehige alte Firmware");
         } else {
-            otaMemorySave();
-            logf("[OTA] Erster Lauf von %s, Bestaetigung steht aus (Start %u von 2)",
-                 FIRMWARE_VERSION, (unsigned)otaMemory.failedBoots);
+            otaMemory.failedBoots++;
+            if (otaMemory.failedBoots > 3) {
+                logf("[OTA] %s hat dreimal keinen vollstaendigen Zyklus geschafft -> Rollback", FIRMWARE_VERSION);
+                otaMemory.pendingVerify = 0;
+                otaMemory.failedBoots = 0;
+                otaMemory.rolledBack = 1;
+                otaMemory.rollbackReported = 0;
+                otaMemorySave();
+                persistSave();
+                if (Update.canRollBack() && Update.rollBack()) {
+                    Serial.flush();
+                    delay(200);
+                    ESP.restart();
+                }
+                logf("[OTA] Rollback nicht moeglich - keine bootfaehige alte Firmware");
+            } else {
+                otaMemorySave();
+                logf("[OTA] Lauf %u von %s, bestaetigt nach dem ersten vollstaendigen Zyklus (Bild + Rueckmeldung)",
+                     (unsigned)otaMemory.failedBoots, FIRMWARE_VERSION);
+            }
         }
     }
 
@@ -275,10 +391,26 @@ void setup() {
     g_storageOk = FFat.begin(true);   // formatiert beim ersten Mal
     if (!g_storageOk) logf("[WARN] Flash-Dateisystem nicht verfuegbar - kein Offline-Bild");
 
+    // Nach Stromausfall steht das letzte Bild meist noch auf dem Panel: nicht
+    // ohne Grund neu zeichnen (30 s Refresh, Verschleiß)
+    if (!persisted && g_storageOk) {
+        String shown = readShown();
+        if (isHexHash(shown)) {
+            shown.toCharArray(storedHash, sizeof(storedHash));
+            logf("[RTC] Panel zeigt noch Bild %.8s", storedHash);
+        }
+    }
+    // Eine frisch eingespielte Firmware muss das Bild einmal selbst zeichnen, bevor sie als gut gilt
+    if (otaMemory.pendingVerify && storedHash[0]) {
+        storedHash[0] = 0;
+        logf("[OTA] Bild wird zur Probe neu gezeichnet");
+    }
+    persistSave();
+
     if (hasUnsetConfig()) {
         logf("[ERR] Konfiguration unvollstaendig. Bitte config.private.h oder config.example.h anpassen.");
         setError("Konfiguration unvollstaendig");
-        if (!setupShown) { showSetupPage(); setupShown = 1; }
+        if (!setupShown) { showSetupPage(); setupShown = 1; persistSave(); }
         goSleep(POLL_FALLBACK_SEC);
     }
 
@@ -288,6 +420,7 @@ void setup() {
         onCycleFailed(true);
         goSleep(POLL_FALLBACK_SEC);
     }
+    feedWatchdog();
 
     // ── Meta (Hash, Wake, Bildformat, Firmware, Uhrzeit, Reinigung) ──────────
     Meta meta;
@@ -295,7 +428,7 @@ void setup() {
         // Alter Server ohne meta.json? Notfalls nur den Hash holen.
         meta.hash = httpGetString(String(SERVER_BASE_URL) + "/hash");
         meta.hash.trim();
-        if (meta.hash.isEmpty()) {
+        if (!isHexHash(meta.hash)) {
             logf("[WARN] Server nicht erreichbar (/meta.json und /hash)");
             setError("Server nicht erreichbar");
             onCycleFailed(false);
@@ -303,7 +436,9 @@ void setup() {
             WiFi.mode(WIFI_OFF);
             goSleep(POLL_FALLBACK_SEC);
         }
+        g_metaAtMs = millis();
     }
+    feedWatchdog();
     logf("[Hash] server=%s lokal=%s", meta.hash.c_str(), storedHash[0] ? storedHash : "(leer)");
 
     // ── Uhr vom Server stellen ───────────────────────────────────────────────
@@ -326,32 +461,21 @@ void setup() {
         bannerShown = 0;
         storedHash[0] = 0;      // Balken steht auf dem Panel -> Bild in jedem Fall neu zeichnen
     }
-
-    // ── Rollback-Schutz: WLAN und Server funktionieren, diese Firmware ist gut ──
-    const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t otaState;
-    if (running && esp_ota_get_state_partition(running, &otaState) == ESP_OK
-        && otaState == ESP_OTA_IMG_PENDING_VERIFY) {
-        esp_ota_mark_app_valid_cancel_rollback();
-    }
-    if (otaMemory.pendingVerify) {
-        otaMemory.pendingVerify = 0;
-        otaMemory.failedBoots = 0;
-        otaMemory.targetVersion[0] = 0;
-        otaMemorySave();
-        logf("[OTA] Neue Firmware %s bestaetigt (Partition %s)", FIRMWARE_VERSION, running ? running->label : "?");
-    }
+    persistSave();
 
     // ── Wurde die letzte Firmware zurückgerollt? ─────────────────────────────
-    String rejectedVersion;
+    // (Eine neue Firmware wird erst am Ende eines vollständigen Zyklus bestätigt, siehe confirmFirmware)
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    String rejectedVersion, rejectedMd5;
     const esp_partition_t* other = esp_ota_get_next_update_partition(NULL);
     esp_ota_img_states_t otherState;
     bool otherAborted = other && esp_ota_get_state_partition(other, &otherState) == ESP_OK
         && (otherState == ESP_OTA_IMG_ABORTED || otherState == ESP_OTA_IMG_INVALID);
-    if (otaMemory.targetVersion[0] && (otaMemory.rolledBack || otherAborted)) {
+    if (otaMemory.targetVersion[0] && !otaMemory.pendingVerify && (otaMemory.rolledBack || otherAborted)) {
         rejectedVersion = otaMemory.targetVersion;
+        rejectedMd5 = otaMemory.targetMd5;
         if (!otaMemory.rollbackReported) {
-            g_error = String("Firmware ") + rejectedVersion + " zurueckgerollt: Start ohne Serverkontakt";
+            g_error = String("Firmware ") + rejectedVersion + " zurueckgerollt: kein vollstaendiger Zyklus nach dem Update";
             logf("[OTA] %s (laeuft wieder %s auf %s)", g_error.c_str(), FIRMWARE_VERSION, running ? running->label : "?");
             otaMemory.rollbackReported = 1;
             otaMemorySave();
@@ -359,26 +483,44 @@ void setup() {
     }
 
     // ── Firmware-Update? ─────────────────────────────────────────────────────
-    if (FIRMWARE_OTA_ENABLED && !meta.firmwareVersion.isEmpty()
-        && meta.firmwareVersion != FIRMWARE_VERSION && !meta.firmwareUrl.isEmpty()) {
-        if (meta.firmwareVersion == rejectedVersion) {
-            logf("[OTA] %s wurde schon einmal zurueckgerollt - kein neuer Versuch, bis eine andere Version bereitsteht",
+    // Nur neuere Versionen (ein per USB aufgespieltes 1.4.0 fällt nicht auf ein
+    // bereitgestelltes 1.3.0 zurück) – ausser der Server erzwingt es.
+    if (FIRMWARE_OTA_ENABLED && !meta.firmwareVersion.isEmpty() && !meta.firmwareUrl.isEmpty()
+        && meta.firmwareVersion != FIRMWARE_VERSION) {
+        int cmp = compareVersions(meta.firmwareVersion.c_str(), FIRMWARE_VERSION);
+        String tryId = meta.firmwareMd5.isEmpty() ? meta.firmwareVersion : meta.firmwareMd5;
+        bool rejected = !rejectedVersion.isEmpty() && meta.firmwareVersion == rejectedVersion
+            && (rejectedMd5.isEmpty() || meta.firmwareMd5.isEmpty() || meta.firmwareMd5 == rejectedMd5);
+        if (cmp <= 0 && !meta.firmwareForce) {
+            logf("[OTA] Server bietet %s an, laufend ist %s - nicht neuer, kein Update", meta.firmwareVersion.c_str(), FIRMWARE_VERSION);
+        } else if (rejected) {
+            logf("[OTA] %s wurde schon einmal zurueckgerollt - kein neuer Versuch, bis eine andere Datei bereitsteht",
                  rejectedVersion.c_str());
+        } else if (strcmp(otaMemory.tryId, tryId.c_str()) == 0 && otaMemory.tries >= OTA_MAX_TRIES
+                   && !(nowEpoch() > EPOCH_KNOWN_MIN && otaMemory.triedAt > 0
+                        && nowEpoch() - otaMemory.triedAt > OTA_RETRY_AFTER_SEC)) {
+            logf("[OTA] Einspielen von %s ist %u-mal gescheitert - neuer Versuch mit einer anderen Datei oder nach 24 h",
+                 meta.firmwareVersion.c_str(), (unsigned)otaMemory.tries);
         } else {
-            logf("[OTA] Server bietet %s an, laufend ist %s -> Update", meta.firmwareVersion.c_str(), FIRMWARE_VERSION);
-            meta.firmwareVersion.toCharArray(otaMemory.targetVersion, sizeof(otaMemory.targetVersion));
-            otaMemory.rollbackReported = 0;
-            otaMemory.rolledBack = 0;
-            otaMemorySave();
-            performOta(meta);   // startet bei Erfolg neu; sonst laeuft der Zyklus normal weiter
+            logf("[OTA] Server bietet %s an, laufend ist %s -> Update%s", meta.firmwareVersion.c_str(), FIRMWARE_VERSION,
+                 cmp <= 0 ? " (erzwungen)" : "");
+            performOta(meta, tryId);   // startet bei Erfolg neu; sonst laeuft der Zyklus normal weiter
         }
     }
+    feedWatchdog();
 
     // ── Panelreinigung ───────────────────────────────────────────────────────
     if (meta.cleanDue) {
-        runCleanCycle();
-        g_cleaned = 1;
+        if (runCleanCycle()) {
+            g_cleaned = 1;
+        } else {
+            g_panelFailed = true;
+            g_error = "Panel antwortet nicht (Reinigung)";
+        }
         storedHash[0] = 0;      // danach das Bild in jedem Fall neu
+        rememberShown("");
+        persistSave();
+        feedWatchdog();
     }
 
     // ── Probe des Offline-Hinweises (von der Gerät-Seite angefordert) ────────
@@ -388,52 +530,64 @@ void setup() {
         showOfflineBanner(false, true);
         bannerShown = 1;
         storedHash[0] = 0;
-        if (ACK_ENABLED) sendAck("test", storedHash);
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        goSleep(meta.nextWakeSec);
+        rememberShown("");
+        persistSave();
+        finishCycle("test", meta.nextWakeSec);
     }
 
     // ── Hash unverändert → nur melden und schlafen ───────────────────────────
-    bool shown = false;
     if (meta.hash == String(storedHash)) {
         logf("[Hash] Unveraendert -> Sleep %lu s", (unsigned long)meta.nextWakeSec);
-        if (ACK_ENABLED) sendAck(g_error.isEmpty() ? "unchanged" : "error", storedHash);
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        goSleep(meta.nextWakeSec);
+        finishCycle(g_error.isEmpty() ? "unchanged" : "error", meta.nextWakeSec);
     }
 
     // ── Neues Bild laden und anzeigen ────────────────────────────────────────
-    if (meta.hash != String(storedHash)) {
-        logf("[Hash] Geaendert -> Bild laden...");
-        if (PREFER_COMPACT_IMAGE && !meta.epdUrl.isEmpty()) {
-            shown = fetchAndDisplayEpd(meta.epdUrl, meta.hash.c_str());
-            if (!shown) logf("[WARN] Kompaktes Bild fehlgeschlagen, versuche BMP");
-        }
-        if (!shown) {
-            shown = fetchAndDisplayBmp(meta.hash.c_str());
-        }
-        if (shown) {
-            meta.hash.toCharArray(storedHash, sizeof(storedHash));
-            logf("[OK] Bild aktualisiert (%s, Download %lu ms, Anzeige %lu ms)",
-                 g_imageFormat.c_str(), (unsigned long)g_downloadMs, (unsigned long)g_refreshMs);
+    logf("[Hash] Geaendert -> Bild laden...");
+    bool shown = false;
+    uint32_t sleepSec = meta.nextWakeSec;
+    bool givenUp = strcmp(failedHash, meta.hash.c_str()) == 0 && imageFails >= MAX_IMAGE_TRIES;
+    if (givenUp) {
+        logf("[ERR] Bild %.8s liess sich %u-mal nicht anzeigen - kein neuer Versuch, bis der Server ein anderes hat",
+             meta.hash.c_str(), (unsigned)imageFails);
+        g_error = "Bild wiederholt nicht anzeigbar";
+    } else if (meta.format == "png" && meta.epdUrl.isEmpty()) {
+        g_error = "Server liefert PNG - fuer das Panel OUTPUT_FORMAT=bmp einstellen";
+        logf("[ERR] %s", g_error.c_str());
+    } else if (PREFER_COMPACT_IMAGE && !meta.epdUrl.isEmpty()) {
+        // Kompaktes Bild angeboten: nur das. Ein BMP als Ersatz waere gleich gross
+        // gerendert (5,8 MB umsonst) und scheitert an denselben Netzproblemen.
+        const uint32_t expected = EPD_HEADER_SIZE + EPD_BUF_SIZE;
+        if (meta.epdSize && meta.epdSize != expected) {
+            g_error = String("Server rendert fuer ein anderes Panel (") + meta.epdSize + " statt " + expected
+                    + " Bytes) - RENDER_WIDTH, RENDER_HEIGHT und Drehung pruefen";
+            logf("[ERR] %s", g_error.c_str());
         } else {
-            logf("[ERR] Bild konnte nicht angezeigt werden");
-            if (g_error.isEmpty()) g_error = "Bild konnte nicht geladen werden";
+            shown = fetchAndDisplayEpd(meta.epdUrl, meta.hash.c_str());
         }
     } else {
-        shown = true;
+        shown = fetchAndDisplayBmp(meta.hash.c_str());
     }
 
-    if (ACK_ENABLED) {
-        const char* result = !shown ? "error" : (g_error.isEmpty() ? "updated" : "error");
-        if (!sendAck(result, storedHash)) logf("[WARN] ACK nicht bestaetigt");
+    if (shown) {
+        meta.hash.toCharArray(storedHash, sizeof(storedHash));
+        imageFails = 0;
+        failedHash[0] = 0;
+        rememberShown(storedHash);
+        logf("[OK] Bild aktualisiert (%s, Download %lu ms, Anzeige %lu ms)",
+             g_imageFormat.c_str(), (unsigned long)g_downloadMs, (unsigned long)g_refreshMs);
+    } else if (!givenUp) {
+        if (strcmp(failedHash, meta.hash.c_str()) != 0) {
+            meta.hash.toCharArray(failedHash, sizeof(failedHash));
+            imageFails = 0;
+        }
+        imageFails++;
+        if (g_error.isEmpty()) g_error = "Bild konnte nicht geladen werden";
+        logf("[ERR] Bild konnte nicht angezeigt werden (Versuch %u von %u)", (unsigned)imageFails, (unsigned)MAX_IMAGE_TRIES);
+        // Bald noch einmal versuchen statt einen ganzen Takt das alte Bild zu zeigen
+        if (imageFails < MAX_IMAGE_TRIES && sleepSec > IMAGE_RETRY_SEC) sleepSec = IMAGE_RETRY_SEC;
     }
-
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    goSleep(meta.nextWakeSec);
+    persistSave();
+    finishCycle(shown && g_error.isEmpty() ? "updated" : "error", sleepSec);
 }
 
 void loop() {}
@@ -459,6 +613,65 @@ static void setError(const char* text) {
     strncpy(lastError, text, sizeof(lastError) - 1);
     lastError[sizeof(lastError) - 1] = 0;
     g_error = text;
+    persistSave();
+}
+
+static void feedWatchdog() {
+    esp_task_wdt_reset();
+}
+
+// 32 Hex-Zeichen (MD5). Alles andere – etwa die Antwort eines Captive Portals
+// auf /hash – ist kein Hash und darf weder einen Download noch eine OTA-Bestätigung auslösen.
+static bool isHexHash(const String& s) {
+    if (s.length() != 32) return false;
+    for (size_t i = 0; i < s.length(); i++) {
+        if (!isxdigit((unsigned char)s[i])) return false;
+    }
+    return true;
+}
+
+// Eine frisch eingespielte Firmware gilt als gut, wenn ein Zyklus vollständig
+// durchlief: Server erreicht, Bild angezeigt oder unverändert, Rückmeldung
+// angekommen, das Panel hat geantwortet. Erst dann nicht mehr zurückrollen.
+static void confirmFirmware() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t otaState;
+    if (running && esp_ota_get_state_partition(running, &otaState) == ESP_OK
+        && otaState == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
+    if (!otaMemory.pendingVerify) return;
+    otaMemory.pendingVerify = 0;
+    otaMemory.failedBoots = 0;
+    otaMemory.targetVersion[0] = 0;
+    otaMemory.targetMd5[0] = 0;
+    otaMemory.targetPart[0] = 0;
+    otaMemory.tryId[0] = 0;
+    otaMemory.tries = 0;
+    otaMemory.triedAt = 0;
+    otaMemorySave();
+    logf("[OTA] Neue Firmware %s bestaetigt: Zyklus vollstaendig (Partition %s)", FIRMWARE_VERSION,
+         running ? running->label : "?");
+}
+
+// Schlafzeit ab jetzt: rechnet der Server mit dem Zeitpunkt von /meta.json,
+// zieht das Gerät die Zeit seither ab (Download, Bildaufbau, ACK) – ein langer
+// Zyklus mit Bildaufbau verschiebt so das nächste Aufwachen nicht.
+static bool g_sleepFromMeta = false;
+static uint32_t sleepAfterMeta(uint32_t seconds) {
+    if (!g_sleepFromMeta || !g_metaAtMs) return seconds;
+    uint32_t elapsed = (millis() - g_metaAtMs) / 1000;
+    return seconds > elapsed + MIN_SLEEP_SEC ? seconds - elapsed : MIN_SLEEP_SEC;
+}
+
+// Ende eines Zyklus mit Serverkontakt: melden, ggf. Firmware bestätigen, schlafen
+static void finishCycle(const char* result, uint32_t sleepSec) {
+    bool reported = !ACK_ENABLED || sendAck(result, storedHash);
+    if (!reported) logf("[WARN] ACK nicht bestaetigt");
+    if (reported && !g_panelFailed) confirmFirmware();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    goSleep(sleepAfterMeta(sleepSec));
 }
 
 static int64_t nowEpoch() {
@@ -481,7 +694,27 @@ static const char* wakeReasonText() {
         case ESP_SLEEP_WAKEUP_TIMER: return "timer";
         case ESP_SLEEP_WAKEUP_EXT0:
         case ESP_SLEEP_WAKEUP_EXT1:  return "button";
-        default:                     return "poweron";
+        default:
+            // Kein Aufwachen aus dem Schlaf: der Grund steht im Reset (Einschalten, Absturz, Neustart)
+            return esp_reset_reason() == ESP_RST_POWERON ? "poweron" : "reset";
+    }
+}
+
+// Warum ist der Chip gestartet? Absturz und Watchdog waren früher nicht von
+// „eingeschaltet“ zu unterscheiden – jetzt gehen sie mit der Rückmeldung zum Server.
+static const char* resetReasonText() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_EXT:       return "external";
+        case ESP_RST_SW:        return "restart";
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:   return "int_wdt";
+        case ESP_RST_TASK_WDT:  return "task_wdt";
+        case ESP_RST_WDT:       return "wdt";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "sdio";
+        default:                return "unknown";
     }
 }
 
@@ -509,11 +742,14 @@ static void onCycleFailed(bool wifiFailed) {
     failCount++;
     failWasWifi = wifiFailed ? 1 : 0;
     if (firstFailEpoch == 0 && nowEpoch() > EPOCH_KNOWN_MIN) firstFailEpoch = nowEpoch();
+    persistSave();
     logf("[Net] Fehlzyklus %lu von %lu (%s)", (unsigned long)failCount, (unsigned long)OFFLINE_AFTER_FAILS,
          wifiFailed ? "WLAN" : "Server");
     if (failCount >= OFFLINE_AFTER_FAILS && !bannerShown) {
         showOfflineBanner(wifiFailed, false);
         bannerShown = 1;
+        rememberShown("");
+        persistSave();
     }
 }
 
@@ -543,10 +779,12 @@ static bool loadLastImage(uint8_t* fb, int64_t& outEpoch) {
     return true;
 }
 
+// Erst in eine Temp-Datei, dann umbenennen: Strom weg mitten im Schreiben lässt
+// das alte Bild stehen (vorher: abgeschnittene Datei, Offline-Balken auf Weiß).
 static void saveLastImage(const uint8_t* payload, const char* hash) {
     if (!g_storageOk) return;
     uint32_t t = millis();
-    File f = FFat.open(LAST_IMAGE_PATH, FILE_WRITE);
+    File f = FFat.open(LAST_IMAGE_TMP, FILE_WRITE);
     if (!f) { logf("[WARN] Bild konnte nicht im Flash gespeichert werden"); return; }
     uint8_t header[EPD_HEADER_SIZE] = {'P', 'L', 'X', '6', 1, 4,
         (uint8_t)(EPD_WIDTH & 0xFF), (uint8_t)(EPD_WIDTH >> 8), (uint8_t)(EPD_HEIGHT & 0xFF), (uint8_t)(EPD_HEIGHT >> 8),
@@ -557,11 +795,41 @@ static void saveLastImage(const uint8_t* payload, const char* hash) {
     for (size_t off = 0; ok && off < EPD_BUF_SIZE; off += 32768) {
         size_t n = min((size_t)32768, EPD_BUF_SIZE - off);
         ok = f.write(payload + off, n) == n;
+        feedWatchdog();
     }
     f.close();
-    File m = FFat.open(LAST_META_PATH, FILE_WRITE);
-    if (m) { m.printf("%s\n%lld\n", hash, (long long)nowEpoch()); m.close(); }
+    if (ok) {
+        FFat.remove(LAST_IMAGE_PATH);
+        ok = FFat.rename(LAST_IMAGE_TMP, LAST_IMAGE_PATH);
+    } else {
+        FFat.remove(LAST_IMAGE_TMP);
+    }
+    if (ok) {
+        File m = FFat.open(LAST_META_PATH, FILE_WRITE);
+        if (m) { m.printf("%s\n%lld\n", hash, (long long)nowEpoch()); m.close(); }
+    }
     logf("[Flash] Bild %s (%lu ms)", ok ? "gesichert" : "NICHT gesichert", (unsigned long)(millis() - t));
+}
+
+// Was steht gerade auf dem Panel? Überlebt Stromausfall, damit nach dem
+// Einschalten dasselbe Bild nicht noch einmal gezeichnet wird. "" = Statusbild
+// (Offline-Balken, Reinigung, Einrichtung) – dann in jedem Fall neu zeichnen.
+static void rememberShown(const char* hash) {
+    if (!g_storageOk) return;
+    File f = FFat.open(SHOWN_PATH, FILE_WRITE);
+    if (!f) return;
+    f.print(hash ? hash : "");
+    f.close();
+}
+
+static String readShown() {
+    if (!g_storageOk || !FFat.exists(SHOWN_PATH)) return String();
+    File f = FFat.open(SHOWN_PATH, FILE_READ);
+    if (!f) return String();
+    String s = f.readStringUntil('\n');
+    f.close();
+    s.trim();
+    return s;
 }
 
 // Schwarzer Balken oben auf dem letzten Bild (oder auf Weiß, wenn keins da ist)
@@ -592,8 +860,12 @@ static void showOfflineBanner(bool wifiFailed, bool test) {
 
     logf("[EPD] Offline-Hinweis: %s", line1.c_str());
     uint32_t t = millis();
+    persistSave();
     EPD_Init();
-    EPD_Display(fb);
+    if (!EPD_Display(fb)) {
+        g_panelFailed = true;
+        logf("[ERR] Panel hat beim Offline-Hinweis nicht geantwortet (BUSY)");
+    }
     g_refreshMs = millis() - t;
     heap_caps_free(fb);
 }
@@ -619,16 +891,22 @@ static void showSetupPage() {
     EPD_Display(fb);
     heap_caps_free(fb);
     storedHash[0] = 0;
+    rememberShown("");
+    persistSave();
 }
 
 // Geisterbilder loswerden: einmal Schwarz, einmal Weiß, das Bild kommt danach neu
-static void runCleanCycle() {
+static bool runCleanCycle() {
     logf("[EPD] Reinigung: Schwarz, Weiss");
     uint32_t t = millis();
     EPD_Init();
-    EPD_Clear(EPD_COLOR_BLACK);
-    EPD_Clear(EPD_COLOR_WHITE);
-    logf("[EPD] Reinigung fertig (%lu ms)", (unsigned long)(millis() - t));
+    bool ok = EPD_Clear(EPD_COLOR_BLACK);
+    feedWatchdog();
+    ok = EPD_Clear(EPD_COLOR_WHITE) && ok;
+    feedWatchdog();
+    logf("[EPD] Reinigung %s (%lu ms)", ok ? "fertig" : "FEHLGESCHLAGEN - Panel antwortet nicht (BUSY)",
+         (unsigned long)(millis() - t));
+    return ok;
 }
 
 
@@ -663,8 +941,9 @@ bool connectWiFi() {
 // ════════════════════════════════════════════════════════════════════════════
 //  HTTP
 // ════════════════════════════════════════════════════════════════════════════
-bool httpBegin(HTTPClient& http, const String& url) {
-    http.setTimeout(HTTP_TIMEOUT_MS);
+bool httpBegin(HTTPClient& http, const String& url, uint32_t timeoutMs) {
+    http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+    http.setTimeout(timeoutMs);
     if (!http.begin(url)) {
         logf("[HTTP] begin fehlgeschlagen fuer %s", url.c_str());
         return false;
@@ -672,10 +951,12 @@ bool httpBegin(HTTPClient& http, const String& url) {
     return true;
 }
 
-String httpGetString(const String& url) {
+// Kurze Antworten (meta.json, hash): eigenes, kurzes Timeout. Ein Server, der die
+// Verbindung annimmt, aber nicht antwortet, kostete sonst 2 × 60 s pro Anfrage.
+String httpGetString(const String& url, uint32_t timeoutMs) {
     for (uint32_t attempt = 1; attempt <= HTTP_RETRY_COUNT; attempt++) {
         HTTPClient http;
-        if (!httpBegin(http, url)) {
+        if (!httpBegin(http, url, timeoutMs)) {
             if (attempt < HTTP_RETRY_COUNT) delay(HTTP_RETRY_DELAY_MS);
             continue;
         }
@@ -699,7 +980,7 @@ String httpGetString(const String& url) {
 bool httpGetBinary(const String& url, uint8_t* buf, size_t bufSize, size_t& outLen) {
     for (uint32_t attempt = 1; attempt <= HTTP_RETRY_COUNT; attempt++) {
         HTTPClient http;
-        if (!httpBegin(http, url)) {
+        if (!httpBegin(http, url, HTTP_TIMEOUT_MS)) {
             if (attempt < HTTP_RETRY_COUNT) delay(HTTP_RETRY_DELAY_MS);
             continue;
         }
@@ -753,6 +1034,7 @@ bool httpGetBinary(const String& url, uint8_t* buf, size_t bufSize, size_t& outL
             memcpy(buf + outLen, chunk, rd);
             outLen += rd;
             lastProgressAt = millis();
+            feedWatchdog();
             if (contentLen > 0 && (int)outLen >= contentLen) break;
         }
 
@@ -774,10 +1056,10 @@ bool httpGetBinary(const String& url, uint8_t* buf, size_t bufSize, size_t& outL
     return false;
 }
 
-bool httpPostJson(const String& url, const String& body, int& outCode) {
+bool httpPostJson(const String& url, const String& body, int& outCode, uint32_t timeoutMs) {
     for (uint32_t attempt = 1; attempt <= HTTP_RETRY_COUNT; attempt++) {
         HTTPClient http;
-        if (!httpBegin(http, url)) {
+        if (!httpBegin(http, url, timeoutMs)) {
             if (attempt < HTTP_RETRY_COUNT) delay(HTTP_RETRY_DELAY_MS);
             continue;
         }
@@ -876,30 +1158,41 @@ bool parseStringField(const String& json, const char* key, String& outValue) {
 }
 
 bool fetchMeta(Meta& meta) {
-    String body = httpGetString(String(SERVER_BASE_URL) + "/meta.json");
+    // sleep=from_meta: „ich ziehe die Zeit ab meta.json selbst ab“ – der Server
+    // bestätigt das mit sleep_from=meta und rechnet dann nur die Zeit bis meta.json ein.
+    String body = httpGetString(String(SERVER_BASE_URL) + "/meta.json?sleep=from_meta");
     if (body.isEmpty()) return false;
+    g_metaAtMs = millis();
 
-    if (!parseStringField(body, "hash", meta.hash) || meta.hash.isEmpty()) {
-        logf("[Meta] hash fehlt");
+    if (!parseStringField(body, "hash", meta.hash) || !isHexHash(meta.hash)) {
+        logf("[Meta] hash fehlt oder ist kein Hash");
         return false;
     }
     if (!parsePositiveUIntField(body, "next_wake_sec", meta.nextWakeSec)) {
         logf("[Meta] next_wake_sec fehlt oder ist ungueltig");
         meta.nextWakeSec = POLL_FALLBACK_SEC;
     }
+    parseStringField(body, "format", meta.format);
     parseStringField(body, "epd_url", meta.epdUrl);
+    parsePositiveUIntField(body, "epd_size", meta.epdSize);
     parseStringField(body, "firmware_version", meta.firmwareVersion);
     parseStringField(body, "firmware_md5", meta.firmwareMd5);
     parseStringField(body, "firmware_url", meta.firmwareUrl);
+    parseBoolField(body, "firmware_force", meta.firmwareForce);
+    String sleepFrom;
+    meta.sleepFromMeta = parseStringField(body, "sleep_from", sleepFrom) && sleepFrom == "meta";
+    g_sleepFromMeta = meta.sleepFromMeta;
     int64_t v;
     if (parseIntField(body, "epoch", v)) meta.epoch = v;
     if (parseIntField(body, "tz_offset_sec", v)) meta.tzOffsetSec = (int32_t)v;
     parseBoolField(body, "clean_due", meta.cleanDue);
     parseBoolField(body, "show_offline_test", meta.showOfflineTest);
-    logf("[Meta] next_wake_sec=%lu epd=%s firmware=%s uhr=%s%s%s",
+    logf("[Meta] next_wake_sec=%lu%s epd=%s firmware=%s%s uhr=%s%s%s",
          (unsigned long)meta.nextWakeSec,
+         meta.sleepFromMeta ? " (ab meta)" : "",
          meta.epdUrl.isEmpty() ? "nein" : "ja",
          meta.firmwareVersion.isEmpty() ? "-" : meta.firmwareVersion.c_str(),
+         meta.firmwareForce ? " (erzwungen)" : "",
          meta.epoch > EPOCH_KNOWN_MIN ? "ja" : "nein",
          meta.cleanDue ? " reinigung=faellig" : "",
          meta.showOfflineTest ? " offline-probe" : "");
@@ -910,9 +1203,31 @@ bool fetchMeta(Meta& meta) {
 // ════════════════════════════════════════════════════════════════════════════
 //  OTA
 // ════════════════════════════════════════════════════════════════════════════
-bool performOta(const Meta& meta) {
+bool performOta(const Meta& meta, const String& tryId) {
     String url = meta.firmwareUrl;
     if (url.startsWith("/")) url = String(SERVER_BASE_URL) + url;
+    const esp_partition_t* target = esp_ota_get_next_update_partition(NULL);
+
+    // Versuche je Datei zählen (NVS), damit eine kaputte Datei oder schwaches WLAN
+    // nicht bei jedem Aufwachen 3 MB lädt und den App-Slot neu schreibt
+    if (strcmp(otaMemory.tryId, tryId.c_str()) != 0 || otaMemory.tries >= OTA_MAX_TRIES) {
+        strlcpy(otaMemory.tryId, tryId.c_str(), sizeof(otaMemory.tryId));
+        otaMemory.tries = 0;     // andere Datei, oder die Sperrfrist ist um
+    }
+    otaMemory.tries++;
+    otaMemory.triedAt = nowEpoch() > EPOCH_KNOWN_MIN ? nowEpoch() : 0;
+    // Schon vor dem Einspielen merken: fällt der Strom zwischen Umschalten der
+    // Bootpartition und dem Merken, bliebe die neue Firmware sonst ungeprüft.
+    // Läuft nach dem Neustart nicht die Zielpartition, war das Update nicht aktiv.
+    meta.firmwareVersion.toCharArray(otaMemory.targetVersion, sizeof(otaMemory.targetVersion));
+    meta.firmwareMd5.toCharArray(otaMemory.targetMd5, sizeof(otaMemory.targetMd5));
+    strlcpy(otaMemory.targetPart, target ? target->label : "", sizeof(otaMemory.targetPart));
+    otaMemory.pendingVerify = 1;
+    otaMemory.failedBoots = 0;
+    otaMemory.rollbackReported = 0;
+    otaMemory.rolledBack = 0;
+    otaMemorySave();
+    persistSave();
 
     // Erst melden, dann flashen: so weiss der Server, warum das Geraet gleich neu startet
     if (ACK_ENABLED) sendAck("ota", storedHash, meta.firmwareVersion.c_str());
@@ -921,34 +1236,45 @@ bool performOta(const Meta& meta) {
     httpUpdate.rebootOnUpdate(false);
     httpUpdate.setLedPin(-1);
     uint32_t t = millis();
+    feedWatchdog();
     t_httpUpdate_return ret = httpUpdate.update(client, url, FIRMWARE_VERSION);
+    feedWatchdog();
 
-    switch (ret) {
-        case HTTP_UPDATE_OK:
-            logf("[OTA] Firmware %s geschrieben (%lu ms), Neustart", meta.firmwareVersion.c_str(),
-                 (unsigned long)(millis() - t));
-            // Ab jetzt muss sich die neue Firmware beweisen (siehe OtaMemory)
-            otaMemory.pendingVerify = 1;
-            otaMemory.failedBoots = 0;
-            otaMemorySave();
-            Serial.flush();
-            delay(200);
-            ESP.restart();
-            return true;   // nicht erreicht
-        case HTTP_UPDATE_NO_UPDATES:
-            logf("[OTA] Server meldet: kein Update");
-            return false;
-        default:
-            logf("[OTA] Fehlgeschlagen: %d %s", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
-            g_error = String("OTA fehlgeschlagen: ") + httpUpdate.getLastErrorString();
-            return false;
+    if (ret == HTTP_UPDATE_OK) {
+        logf("[OTA] Firmware %s geschrieben (%lu ms, Versuch %u), Neustart", meta.firmwareVersion.c_str(),
+             (unsigned long)(millis() - t), (unsigned)otaMemory.tries);
+        Serial.flush();
+        delay(200);
+        ESP.restart();
+        return true;   // nicht erreicht
     }
+    // Nicht eingespielt: nichts zu prüfen, die laufende Firmware bleibt
+    otaMemory.pendingVerify = 0;
+    otaMemory.targetPart[0] = 0;
+    otaMemorySave();
+    if (ret == HTTP_UPDATE_NO_UPDATES) {
+        logf("[OTA] Server meldet: kein Update");
+        return false;
+    }
+    logf("[OTA] Fehlgeschlagen (Versuch %u von %u): %d %s", (unsigned)otaMemory.tries, (unsigned)OTA_MAX_TRIES,
+         httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+    g_error = String("OTA fehlgeschlagen: ") + httpUpdate.getLastErrorString();
+    return false;
 }
 
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Kompaktes Bild (PLX6, 4 bpp) → direkt ins Display
 // ════════════════════════════════════════════════════════════════════════════
+
+// Das Panel hat nicht geantwortet (BUSY blieb aktiv): Fehler melden statt „updated“.
+// Zählt gegen eine frisch eingespielte Firmware (keine Bestätigung in diesem Zyklus).
+static bool panelFailed() {
+    g_panelFailed = true;
+    g_error = "Panel antwortet nicht (BUSY-Timeout) - Kabel und Stromversorgung pruefen";
+    logf("[ERR] %s", g_error.c_str());
+    return false;
+}
 bool fetchAndDisplayEpd(const String& path, const char* hash) {
     String url = path.startsWith("/") ? String(SERVER_BASE_URL) + path : path;
     const size_t BUF_SIZE = EPD_HEADER_SIZE + EPD_BUF_SIZE + 64;
@@ -984,13 +1310,20 @@ bool fetchAndDisplayEpd(const String& path, const char* hash) {
     }
 
     t = millis();
+    feedWatchdog();
+    persistSave();
     EPD_Init();
     logf("[EPD] Sende kompaktes Bild an Display...");
-    EPD_Display(buf + EPD_HEADER_SIZE);
+    bool panelOk = EPD_Display(buf + EPD_HEADER_SIZE);
     g_refreshMs = millis() - t;
+    feedWatchdog();
+    g_imageFormat = "epd4";
+    if (!panelOk) {
+        heap_caps_free(buf);
+        return panelFailed();
+    }
     saveLastImage(buf + EPD_HEADER_SIZE, hash);
     heap_caps_free(buf);
-    g_imageFormat = "epd4";
     logf("[EPD] Fertig!");
     return true;
 }
@@ -1115,12 +1448,19 @@ bool fetchAndDisplayBmp(const char* hash) {
     heap_caps_free(bmpBuf);
 
     logf("[EPD] Sende BMP-Bild an Display...");
-    EPD_Display(epdBuf);
+    feedWatchdog();
+    persistSave();
+    bool panelOk = EPD_Display(epdBuf);
     g_refreshMs = millis() - t;
+    feedWatchdog();
+    g_imageFormat = "bmp";
+    if (!panelOk) {
+        heap_caps_free(epdBuf);
+        return panelFailed();
+    }
     saveLastImage(epdBuf, hash);
 
     heap_caps_free(epdBuf);
-    g_imageFormat = "bmp";
     logf("[EPD] Fertig!");
     return true;
 }
@@ -1146,6 +1486,8 @@ bool sendAck(const char* result, const char* hash, const char* fwTarget) {
     if (g_refreshMs)  { body += ",\"refresh_ms\":";  body += String((unsigned long)g_refreshMs); }
     if (!g_imageFormat.isEmpty()) { body += ",\"image_format\":\""; body += g_imageFormat; body += "\""; }
     body += ",\"wake_reason\":\""; body += wakeReasonText(); body += "\"";
+    body += ",\"reset_reason\":\""; body += resetReasonText(); body += "\"";
+    if (g_metaAtMs) { body += ",\"meta_ms\":"; body += String((unsigned long)g_metaAtMs); }
     if (g_cleaned)        { body += ",\"cleaned\":1"; }
     if (g_offlineSeconds) { body += ",\"offline_s\":"; body += String((unsigned long)g_offlineSeconds); }
     if (!g_error.isEmpty()) { body += ",\"error\":\""; body += jsonEscape(g_error); body += "\""; }
@@ -1169,10 +1511,11 @@ bool sendAck(const char* result, const char* hash, const char* fwTarget) {
     body += '}';
 
     int code = -1;
-    bool ok = httpPostJson(String(SERVER_BASE_URL) + "/ack", body, code);
+    bool ok = httpPostJson(String(SERVER_BASE_URL) + "/ack", body, code, ACK_TIMEOUT_MS);
     Serial.printf("[ACK] POST /ack (%s, %u Bytes) -> HTTP %d\n", result, (unsigned)body.length(), code);
     if (ok) {
         lastError[0] = 0;      // Server hat den Fehler des letzten Zyklus jetzt gesehen
+        persistSave();
         g_log = "";
         g_cleaned = 0;
         g_offlineSeconds = 0;
@@ -1185,6 +1528,11 @@ bool sendAck(const char* result, const char* hash, const char* fwTarget) {
 //  Deep Sleep
 // ════════════════════════════════════════════════════════════════════════════
 void goSleep(uint32_t seconds) {
+    // Grenzen: ein Serverfehler darf das Gerät weder im Sekundentakt wecken
+    // noch für Tage schlafen legen (dann hilft nur noch Stromtrennen)
+    if (seconds < MIN_SLEEP_SEC) seconds = MIN_SLEEP_SEC;
+    if (seconds > MAX_SLEEP_SEC) seconds = MAX_SLEEP_SEC;
+    persistSave();
     Serial.printf("[Sleep] Deep Sleep fuer %lu s\n", (unsigned long)seconds);
     Serial.flush();
     EPD_Sleep();

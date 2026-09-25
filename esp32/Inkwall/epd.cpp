@@ -1,4 +1,5 @@
 #include "epd.h"
+#include <esp_task_wdt.h>
 
 // Hardware-SPI (FSPI / SPI2 auf ESP32-S3) – viel schneller als Bit-Bang für 5.76 MB
 static SPIClass epd_spi(FSPI);
@@ -57,16 +58,22 @@ static inline void CS_ALL_L(){ digitalWrite(PIN_EPD_CS_M, LOW);  digitalWrite(PI
 static inline void CS_ALL_H(){ digitalWrite(PIN_EPD_CS_M, HIGH); digitalWrite(PIN_EPD_CS_S, HIGH); }
 
 // BUSY: LOW = beschäftigt, HIGH = bereit  (Quelle: EPD_13IN3E_ReadBusyH)
-static void WaitBusy(uint32_t timeoutMs = 90000) {
+// false bei Timeout: ein Panel, das nicht antwortet (loses Flachbandkabel, keine
+// Spannung), meldete früher trotzdem "aktualisiert". Der Watchdog wird hier
+// gefüttert, weil die Wartezeit selbst begrenzt ist.
+static bool WaitBusy(uint32_t timeoutMs = 90000) {
     uint32_t t = millis();
     while (digitalRead(PIN_EPD_BUSY) == LOW) {
         if (millis() - t > timeoutMs) {
             Serial.println("[EPD] WaitBusy Timeout!");
-            break;
+            delay(20);
+            return false;
         }
+        esp_task_wdt_reset();
         delay(10);
     }
     delay(20);
+    return true;
 }
 
 // Sendet [Cmd, data[0..len-1]] über SPI. CS muss vorher LOW gesetzt sein.
@@ -76,12 +83,12 @@ static void SpiSend(uint8_t cmd, const uint8_t* data, size_t len) {
 }
 
 // ─── TurnOnDisplay  (PON → DRF → POF) ────────────────────────────────────────
-static void TurnOnDisplay(void) {
+static bool TurnOnDisplay(void) {
     Serial.print("[EPD] Power On... ");
     CS_ALL_L();
     epd_spi.transfer(CMD_PON);
     CS_ALL_H();
-    WaitBusy();
+    bool ok = WaitBusy();
 
     delay(50);
 
@@ -89,12 +96,16 @@ static void TurnOnDisplay(void) {
     CS_ALL_L();
     SpiSend(CMD_DRF, V_DRF, sizeof(V_DRF));
     CS_ALL_H();
-    WaitBusy();
+    ok = WaitBusy() && ok;
 
     CS_ALL_L();
     SpiSend(CMD_POF, V_POF, sizeof(V_POF));
     CS_ALL_H();
-    Serial.println("Done.");
+    // Kurz auf das Abschalten warten, bevor der nächste Befehl kommt (Reinigung:
+    // Schwarz direkt gefolgt von Weiß). Bewusst kurz und nicht als Fehler gewertet.
+    WaitBusy(5000);
+    Serial.println(ok ? "Done." : "FEHLER (BUSY)");
+    return ok;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -161,7 +172,7 @@ void EPD_Init(void) {
 // imageBuffer: EPD_HEIGHT Zeilen × EPD_ROW_BYTES (600) Bytes
 //   Bytes 0..EPD_HALF_ROW_BYTES-1   (0..299)  → Master CS (linke 600px)
 //   Bytes EPD_HALF_ROW_BYTES..EPD_ROW_BYTES-1 (300..599) → Slave CS (rechte 600px)
-void EPD_Display(const uint8_t* imageBuffer) {
+bool EPD_Display(const uint8_t* imageBuffer) {
     const uint32_t rowBytes  = EPD_ROW_BYTES;       // 600
     const uint32_t halfBytes = EPD_HALF_ROW_BYTES;  // 300
     const uint32_t height    = EPD_HEIGHT;           // 1600
@@ -192,10 +203,10 @@ void EPD_Display(const uint8_t* imageBuffer) {
     }
     CS_ALL_H();
 
-    TurnOnDisplay();
+    return TurnOnDisplay();
 }
 
-void EPD_Clear(uint8_t color) {
+bool EPD_Clear(uint8_t color) {
     const uint32_t halfBytes = EPD_HALF_ROW_BYTES;
     const uint32_t height    = EPD_HEIGHT;
     uint8_t fill = (color << 4) | color;
@@ -220,7 +231,7 @@ void EPD_Clear(uint8_t color) {
     }
     CS_ALL_H();
 
-    TurnOnDisplay();
+    return TurnOnDisplay();
 }
 
 void EPD_Sleep(void) {

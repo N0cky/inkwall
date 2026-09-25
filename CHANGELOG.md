@@ -35,6 +35,10 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - On-demand module preview `/api/preview/<module>.png` with theme override and 6-colour display simulation, wired into the settings page
 - Optional `PLEXINK_UI_PASSWORD` (HTTP Basic Auth for the web UI; ESP32 endpoints stay open)
 - Render smoke tests with recorded API fixtures for every module in every theme; test isolation from the local config
+- Firmware 1.3.0: a new firmware counts as good only after a complete cycle – image shown (or unchanged), acknowledgement delivered, panel answered. Before, it was confirmed as soon as `/meta.json` answered, so a firmware that hung or crashed while drawing was never rolled back. Three starts without a complete cycle roll back; an update that never became active (power lost while flashing) is not held against the running firmware
+- Firmware 1.3.0: only newer versions are installed over the air (a USB-flashed 1.4.0 no longer falls back to a hosted 1.3.0); older versions and test builds need "Auch einspielen, wenn die Version nicht neuer ist" on the Gerät page (`firmware_force`). A file that fails to install is tried at most three times (again after 24 h or with another file); a rolled-back file is recognised by version and MD5, so a fixed rebuild with the same version number is installed
+- Firmware 1.3.0 reports why it started (`reset_reason`: power on, crash, watchdog, brownout …); the server logs crashes as an event and shows the last start on the Gerät page. Image hash, failure counter and "seit HH:MM" survive crash and watchdog resets (RTC memory with checksum); after a power cut the device remembers which image is still on the panel and does not redraw it
+- Firmware 1.3.0 asks for `/meta.json?sleep=from_meta` and subtracts the time spent after it (download, refresh, acknowledgement) from `next_wake_sec`; the server then only accounts for the time up to `/meta.json` (`meta_ms`). A cycle with a 30 s refresh no longer shifts the next wake-up past the rotation boundary
 
 ### Changed
 
@@ -61,6 +65,8 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Gallery decodes large JPEGs at the size the page needs (a 24 MP photo took half a second and about 450 MB of memory) and prepares the smaller image for the panel
 - Word wrapping measures every word once instead of re-measuring the growing line (Tagesschau renders about a third faster)
 - Plex and Steam: in landscape (the default 1600 × 1200) the cover gets smaller so the text block fits above the progress bar; the "Aktualisiert" stamp is right-aligned to its actual width
+- Firmware 1.3.0: meta, hash and acknowledgement use a 10 s timeout (a server that accepted the connection but did not answer kept the device awake for minutes and ended in the watchdog); the watchdog is fed between phases; every sleep is bounded to 10 s … 6 h
+- Firmware 1.3.0: when the compact image is offered there is no 5.8 MB BMP fallback any more; a server rendering PNG or a different panel size gets a clear error instead of a futile download; a failed image is retried after 2 minutes, at most three times per image
 
 ### Fixed
 
@@ -88,6 +94,9 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - A single word wider than its column (long destinations in Abfahrten, calendar titles, warning headlines) ran over the edge; it is shortened with "…" now. The Abfahrten stop heading, the calendar legend (no longer runs into the title) and the calendar time column ("10:00 – 11:30" with the wider container font) are bounded as well
 - An odd render width (or height with 90°/270° rotation) made every BMP render fail; sizes are rounded down to even numbers
 - The "no content" placeholder scales with the page and wraps its text
+- Firmware: a panel that did not answer (BUSY timeout, loose ribbon cable) was reported as "updated"; it is an error now, and the panel gets time to power off between the two fills of the cleaning cycle
+- Firmware: the `/hash` fallback accepted any HTTP 200 body (a captive portal page counted as a hash); both meta and hash must be 32 hex characters now
+- Firmware: the offline image in flash was truncated before it was rewritten – a power cut while saving left the banner on a white page; it is written to a temporary file and renamed
 
 ## [0.1.0] - 2026-04-20
 

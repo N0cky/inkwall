@@ -76,7 +76,8 @@ details[open] summary { margin-bottom: 8px; }
                 <button class="btn primary" type="button" id="fwUpload">Hochladen</button>
                 <button class="btn" type="button" id="fwDelete" hidden>Entfernen</button>
             </div>
-            <div class="hint" style="margin-top:8px">Die .bin aus dem Arduino-Build hochladen. Das Gerät vergleicht beim nächsten Aufwachen die Version, spielt das Update ein und meldet sich mit der neuen Firmware zurück. Schlägt der Start fehl, kehrt es von allein zur alten Firmware zurück.</div>
+            <label class="check" style="margin-top:8px"><input type="checkbox" id="fwForce"><span>Auch einspielen, wenn die Version nicht neuer ist (Downgrade, Test-Build)</span></label>
+            <div class="hint" style="margin-top:8px">Die .bin aus dem Arduino-Build hochladen. Das Gerät vergleicht beim nächsten Aufwachen die Version und spielt eine neuere ein. Die neue Firmware gilt erst als gut, wenn sie ein Bild angezeigt und sich zurückgemeldet hat – schafft sie das dreimal nicht, kehrt das Gerät von allein zur alten zurück.</div>
         </div></div>
         <div class="card"><div class="card-body">
             <div class="card-title">Benachrichtigung</div>
@@ -308,6 +309,10 @@ details[open] summary { margin-bottom: 8px; }
                     if (d.refresh_ms != null) parts.push('Anzeige ' + (d.refresh_ms / 1000).toFixed(1) + ' s');
                     html += kv('Letzter Zyklus', esc((d.cycle_ms / 1000).toFixed(1) + ' s') + (parts.length ? ' <span class="hint">· ' + esc(parts.join(' · ')) + '</span>' : '') + (d.image_format ? ' <span class="hint">· ' + esc(d.image_format === 'epd4' ? 'kompakt' : d.image_format.toUpperCase()) + '</span>' : ''));
                 }
+                if (d.reset_reason && d.reset_reason !== 'deepsleep') {
+                    var crash = ['panic', 'task_wdt', 'int_wdt', 'wdt', 'brownout'].indexOf(d.reset_reason) >= 0;
+                    html += kv('Letzter Start', esc(d.reset_label || d.reset_reason) + (crash ? ' <span class="chip warn">Absturz</span>' : ''));
+                }
                 if (d.free_psram_kb != null) html += kv('Freier PSRAM', esc(Math.round(d.free_psram_kb / 1024) + ' MB') + (d.boot_count != null ? ' <span class="hint">· Boot #' + esc(d.boot_count) + '</span>' : ''));
                 if (s.panel) {
                     var p = s.panel;
@@ -345,8 +350,9 @@ details[open] summary { margin-bottom: 8px; }
         var html = '';
         if (fw && fw.hosted) {
             var state = fw.update_pending ? '<span class="chip warn">wartet auf das Gerät</span>'
-                : (fw.device_version === fw.version ? '<span class="chip ok">auf dem Gerät</span>' : '<span class="chip">bereit</span>');
-            html += kv('Bereitgestellt', esc(fw.version) + ' ' + state);
+                : (fw.device_version === fw.version ? '<span class="chip ok">auf dem Gerät</span>'
+                : (fw.not_newer ? '<span class="chip">nicht neuer – das Gerät behält ' + esc(fw.device_version) + '</span>' : '<span class="chip">bereit</span>'));
+            html += kv('Bereitgestellt', esc(fw.version) + ' ' + state + (fw.force ? ' <span class="hint">· erzwungen</span>' : ''));
             html += kv('Datei', esc(Math.round(fw.size / 1024) + ' KB') + ' <span class="hint">· ' + esc(ui.fmtTime(fw.uploaded_at)) + ' · md5 ' + esc(fw.md5.slice(0, 8)) + '…</span>');
         } else {
             html += '<div class="hint">Keine Firmware bereitgestellt. Das Gerät läuft weiter mit seiner jetzigen Version.</div>';
@@ -361,12 +367,14 @@ details[open] summary { margin-bottom: 8px; }
         if (!input.files || !input.files.length) { ui.toast('Bitte zuerst eine .bin-Datei auswählen.', 'error'); return; }
         var btn = this; btn.disabled = true; btn.textContent = 'Lädt hoch …';
         var body = new FormData(); body.append('file', input.files[0]);
+        if ($('fwForce').checked) body.append('force', '1');
         try {
             var r = await fetch('/api/device/firmware', { method: 'POST', body: body });
             var data = await r.json();
             if (!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status));
             ui.toast('Firmware ' + data.firmware.version + ' bereitgestellt. Das Gerät holt sie beim nächsten Aufwachen.', 'ok', 6000);
             input.value = '';
+            $('fwForce').checked = false;
             loadClient();
         } catch (e) { ui.toast('Nicht übernommen: ' + e.message, 'error', 6000); }
         btn.disabled = false; btn.textContent = 'Hochladen';

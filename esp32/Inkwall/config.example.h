@@ -93,6 +93,42 @@
 #define HTTP_TIMEOUT_MS  60000   // BMP-Download: 1200x1600x3 ≈ 5.76 MB
 #endif
 
+// Kurze Anfragen (meta.json, hash, Rückmeldung): ein Server, der die Verbindung
+// annimmt, aber nicht antwortet, hielt das Gerät sonst minutenlang wach
+#ifndef HTTP_SHORT_TIMEOUT_MS
+#define HTTP_SHORT_TIMEOUT_MS  10000
+#endif
+
+#ifndef HTTP_CONNECT_TIMEOUT_MS
+#define HTTP_CONNECT_TIMEOUT_MS  5000
+#endif
+
+// Die Rückmeldung darf etwas länger dauern: an ihr hängt die Bestätigung einer
+// neuen Firmware, und ältere Server verschickten dabei noch Benachrichtigungen
+#ifndef ACK_TIMEOUT_MS
+#define ACK_TIMEOUT_MS  20000
+#endif
+
+// Schlafzeit-Grenzen: schützt vor Serverfehlern (Sekundentakt oder tagelanger Schlaf)
+#ifndef MIN_SLEEP_SEC
+#define MIN_SLEEP_SEC  10
+#endif
+
+#ifndef MAX_SLEEP_SEC
+#define MAX_SLEEP_SEC  21600     // 6 h
+#endif
+
+// Bild ließ sich nicht laden oder anzeigen: nach so vielen Sekunden neu versuchen
+// (statt einen ganzen Takt das alte Bild zu zeigen), höchstens MAX_IMAGE_TRIES-mal
+// je Bild – danach erst wieder, wenn der Server ein anderes Bild hat
+#ifndef IMAGE_RETRY_SEC
+#define IMAGE_RETRY_SEC  120
+#endif
+
+#ifndef MAX_IMAGE_TRIES
+#define MAX_IMAGE_TRIES  3
+#endif
+
 #ifndef HTTP_RETRY_COUNT
 #define HTTP_RETRY_COUNT  2
 #endif
@@ -106,9 +142,10 @@
 #endif
 
 // Firmware-Update ueber den Server: /meta.json nennt die bereitgestellte Version,
-// weicht sie von FIRMWARE_VERSION ab, laedt das Geraet /firmware.bin (MD5-geprueft)
-// in die zweite App-Partition und startet neu. Meldet sich die neue Firmware nicht
-// mit einem erfolgreichen Zyklus zurueck, rollt der Bootloader auf die alte zurueck.
+// ist sie neuer als FIRMWARE_VERSION (oder vom Server erzwungen), laedt das Geraet
+// /firmware.bin (MD5-geprueft) in die zweite App-Partition und startet neu. Schafft
+// die neue Firmware keinen vollstaendigen Zyklus (Bild + Rueckmeldung), rollt sie
+// auf die alte zurueck.
 #ifndef FIRMWARE_OTA_ENABLED
 #define FIRMWARE_OTA_ENABLED  true
 #endif

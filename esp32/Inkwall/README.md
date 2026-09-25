@@ -5,7 +5,7 @@ Das Geraet verbindet sich per WLAN mit dem Inkwall-Server, prueft per Hash auf
 neue Inhalte, laedt bei Bedarf das Bild, zeigt es an, meldet sich zurueck und geht
 anschliessend wieder in den Deep Sleep.
 
-Version: `1.2.0` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
+Version: `1.3.0` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
 
 ## Features
 
@@ -53,7 +53,10 @@ Schalter in `config.example.h` (per `config.private.h` ueberschreibbar):
 |---|---|---|
 | `FIRMWARE_OTA_ENABLED` | `true` | Update einspielen, wenn der Server eine andere Version bereitstellt |
 | `DEVICE_LOG_ENABLED` | `true` | Logzeilen des Zyklus mit dem ACK an den Server schicken |
-| `PREFER_COMPACT_IMAGE` | `true` | `/current.epd` bevorzugen, BMP nur als Fallback |
+| `PREFER_COMPACT_IMAGE` | `true` | `/current.epd` nutzen, wenn der Server es anbietet (sonst BMP) |
+| `HTTP_SHORT_TIMEOUT_MS` / `ACK_TIMEOUT_MS` | `10000` / `20000` | Timeout fuer meta.json und hash / fuer die Rueckmeldung |
+| `MIN_SLEEP_SEC` / `MAX_SLEEP_SEC` | `10` / `21600` | Grenzen jeder Schlafzeit |
+| `IMAGE_RETRY_SEC` / `MAX_IMAGE_TRIES` | `120` / `3` | Neuer Versuch nach einem gescheiterten Bild, wie oft je Bild |
 | `ACK_ENABLED` | `true` | Rueckmeldung nach jedem Zyklus |
 
 ## Ablauf je Wake-Zyklus
@@ -74,14 +77,22 @@ Schalter in `config.example.h` (per `config.private.h` ueberschreibbar):
 1. Firmware bauen (siehe unten), die `.bin` auf der Geraet-Seite der Weboberflaeche hochladen.
    Der Server liest die Version aus dem Marker `INKWALL_FW_VERSION=…` in der Datei.
 2. Beim naechsten Aufwachen vergleicht das Geraet die Version aus `/meta.json` mit seiner
-   eigenen. Weicht sie ab, laedt es die Datei in die freie App-Partition und startet neu.
+   eigenen. Ab 1.3.0 spielt es nur eine **neuere** Version ein (ein per USB aufgespieltes
+   1.4.0 faellt nicht auf ein bereitgestelltes 1.3.0 zurueck). Aeltere Versionen oder
+   Test-Builds (`1.3.0-selftest`) nur, wenn beim Hochladen "Auch einspielen, wenn die
+   Version nicht neuer ist" angehakt war (`firmware_force` in `/meta.json`).
 3. Rollback-Schutz (in der Firmware, nicht im Bootloader – der Arduino-Bootloader markiert
-   neue Firmware sofort als gueltig): Vor dem Neustart merkt sich das Geraet im Flash (NVS)
-   die Zielversion und "Bestaetigung ausstehend". Die neue Firmware zaehlt ihre Starts und
-   gilt erst als bestaetigt, wenn sie WLAN und Server erreicht hat. Zwei Starts ohne
-   Serverkontakt → `Update.rollBack()` auf die alte Partition. Die alte Firmware meldet
-   den Rollback als Fehler (Geraet-Seite) und laedt diese Version nicht noch einmal, bis
-   der Server eine andere bereitstellt. Das Gedaechtnis ueberlebt auch Stromtrennung.
+   neue Firmware sofort als gueltig): Vor dem Einspielen merkt sich das Geraet im Flash (NVS)
+   Zielversion, MD5, Zielpartition und "Bestaetigung ausstehend". Die neue Firmware zaehlt
+   ihre Starts und zeichnet das Bild zur Probe neu; bestaetigt ist sie erst nach einem
+   **vollstaendigen Zyklus** – Bild angezeigt (oder unveraendert), Rueckmeldung angekommen,
+   Panel hat geantwortet. Eine Firmware, die beim Bildaufbau haengt oder abstuerzt, wird so
+   erkannt. Drei Starts ohne vollstaendigen Zyklus → `Update.rollBack()` auf die alte
+   Partition. Die alte Firmware meldet den Rollback als Fehler (Geraet-Seite) und laedt
+   genau diese Datei (Version + MD5) nicht noch einmal. Laeuft nach einem Neustart gar nicht
+   die Zielpartition (Strom weg mitten im Update), ist nichts zu pruefen.
+4. Scheitert das Einspielen selbst (MD5 falsch, WLAN bricht ab), versucht es das Geraet
+   hoechstens dreimal je Datei; nach 24 Stunden oder mit einer anderen Datei wieder.
 
 Selbsttest des Rollbacks (absichtlich kaputte Firmware, die den Server nie erreicht):
 
@@ -89,8 +100,9 @@ Selbsttest des Rollbacks (absichtlich kaputte Firmware, die den Server nie errei
 arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB" --build-property "compiler.cpp.extra_flags=-DOTA_SELFTEST_FAIL" --build-path build-selftest .
 ```
 
-Die Datei meldet sich als `<version>-selftest`, nach dem Update und zwei Starts muss das
-Geraet mit der vorherigen Version und der Fehlermeldung "zurueckgerollt" zurueckkommen.
+Die Datei meldet sich als `<version>-selftest` und ist damit nicht neuer: beim Hochladen
+"Auch einspielen, wenn die Version nicht neuer ist" anhaken. Nach dem Update und drei Starts
+muss das Geraet mit der vorherigen Version und der Fehlermeldung "zurueckgerollt" zurueckkommen.
 Getestet am 3. September 2026 mit 1.1.5.
 
 Voraussetzungen: Partitionsschema mit zwei App-Slots (`16M Flash (3MB APP/9.9MB FATFS)`
@@ -113,8 +125,10 @@ System-Seite gedacht; wer am USB-Port mitlesen will, setzt "USB CDC On Boot: Ena
   "cycle_ms": 6200, "download_ms": 900, "refresh_ms": 4100,
   "image_format": "epd4",
   "wake_reason": "timer",
+  "reset_reason": "deepsleep | poweron | panic | task_wdt | brownout | restart | …",
+  "meta_ms": 5200,
   "error": "…nur bei result=error…",
-  "log": ["== Inkwall 1.1.0 Boot #123 (timer) ==", "…"]
+  "log": ["== Inkwall 1.3.0 Boot #123 (Wecken: timer, Start: deepsleep) ==", "…"]
 }
 ```
 
@@ -134,9 +148,13 @@ der Balken mit "Auf dem Display ausprobieren" einmal zur Probe anzeigen.
 
 ## Erwartetes Serververhalten
 
-- `GET /meta.json` liefert mindestens `{"hash": "…", "next_wake_sec": <zahl>}`; optional
-  `epd_url`, `firmware_version`, `firmware_md5`, `firmware_url`, `epoch`, `tz_offset_sec`,
-  `clean_due`, `show_offline_test`
+- `GET /meta.json?sleep=from_meta` liefert mindestens `{"hash": "<32 Hex-Zeichen>", "next_wake_sec": <zahl>}`;
+  optional `format`, `epd_url`, `epd_size`, `firmware_version`, `firmware_md5`, `firmware_url`,
+  `firmware_force`, `epoch`, `tz_offset_sec`, `clean_due`, `show_offline_test` und
+  `sleep_from: "meta"` – dann zieht das Geraet die Zeit seit `/meta.json` (Download,
+  Bildaufbau, ACK) selbst von `next_wake_sec` ab, und der Server rechnet nur die Zeit bis
+  `/meta.json` ein (`meta_ms` aus dem letzten ACK). Ein langer Zyklus mit Bildaufbau
+  verschiebt so das naechste Aufwachen nicht mehr.
 - `GET /current.epd` liefert das kompakte Bild (Header `PLX6`, 16 Bytes, danach 600 Bytes je Zeile)
 - `GET /current.bmp` liefert ein unkomprimiertes 24-Bit-BMP in `1200x1600`
 - `GET /firmware.bin` liefert die Firmware mit Header `x-MD5`
@@ -166,8 +184,22 @@ Empfohlene Einstellungen:
 
 - WLAN nicht erreichbar: Fallback-Sleep, der Fehler wird im RTC-Speicher gemerkt und mit dem
   naechsten erfolgreichen ACK gemeldet
-- `/meta.json` und `/hash` nicht erreichbar: Fallback-Sleep
-- `next_wake_sec` fehlt oder ist ungueltig: Wake-Intervall faellt auf `POLL_FALLBACK_SEC` zurueck
-- Kompaktes Bild fehlerhaft: Versuch mit BMP; auch das fehlerhaft: kein Display-Update, ACK mit `result=error`
+- `/meta.json` und `/hash` nicht erreichbar (oder die Antwort ist kein Hash, etwa ein Captive
+  Portal): Fallback-Sleep. Kurze Anfragen haben ein eigenes Timeout (`HTTP_SHORT_TIMEOUT_MS`, 10 s)
+- `next_wake_sec` fehlt oder ist ungueltig: Wake-Intervall faellt auf `POLL_FALLBACK_SEC` zurueck;
+  jede Schlafzeit wird auf `MIN_SLEEP_SEC`..`MAX_SLEEP_SEC` (10 s .. 6 h) begrenzt
+- Server liefert PNG (`OUTPUT_FORMAT=png`) oder rendert fuer ein anderes Panel (`epd_size` passt
+  nicht): klare Fehlermeldung im ACK statt eines vergeblichen Downloads
+- Bild laesst sich nicht laden oder anzeigen: neuer Versuch nach `IMAGE_RETRY_SEC` (120 s),
+  hoechstens `MAX_IMAGE_TRIES` (3) je Bild, danach erst wieder bei einem neuen Bild. Wird das
+  kompakte Bild angeboten, gibt es keinen BMP-Ersatz mehr (5,8 MB fuer dasselbe Ergebnis)
+- Panel antwortet nicht (BUSY bleibt aktiv): `result=error` mit "Panel antwortet nicht" statt
+  "updated"; eine frisch eingespielte Firmware wird dann nicht bestaetigt
+- Absturz, Watchdog, Unterspannung: `reset_reason` im ACK, der Server meldet es als Ereignis.
+  Hash, Fehlerzaehler und "seit HH:MM" ueberleben solche Neustarts (RTC_NOINIT mit Pruefsumme);
+  nach einer Stromtrennung merkt sich das Geraet in `/shown.txt`, welches Bild noch auf dem
+  Panel steht, und zeichnet es nicht ohne Grund neu
+- Das letzte Bild fuer den Offline-Hinweis wird erst in `/last.tmp` geschrieben und dann
+  umbenannt – Strom weg beim Schreiben laesst das alte stehen
 - OTA fehlgeschlagen: Meldung im Log, der normale Zyklus laeuft mit der alten Firmware weiter
 - `POST /ack` schlaegt fehl: Warnung im Log, aber kein Abbruch des Zyklus

@@ -76,8 +76,30 @@ def inspect_firmware(data: bytes) -> dict:
     }
 
 
-def store_firmware(data: bytes) -> dict:
+def version_key(version: str) -> tuple[int, int, int]:
+    """'1.3.0' → (1, 3, 0); Anhänge wie '-selftest' zählen nicht – wie in der Firmware."""
+    match = re.match(r"\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", version or "")
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
+
+
+def firmware_update_expected(fw: dict | None, device_version: str) -> bool:
+    """
+    Holt sich das Gerät die bereitgestellte Firmware? Ab 1.3.0 nur, wenn sie
+    neuer ist – oder wenn sie beim Hochladen erzwungen wurde (Downgrade, Test-Build).
+    Ältere Firmware nimmt jede andere Version.
+    """
+    if not fw or not device_version or fw.get("version") == device_version:
+        return False
+    if fw.get("force") or version_key(device_version) < (1, 3, 0):
+        return True
+    return version_key(fw["version"]) > version_key(device_version)
+
+
+def store_firmware(data: bytes, force: bool = False) -> dict:
     info = inspect_firmware(data)
+    info["force"] = bool(force)
     info["uploaded_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _lock:
         FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
@@ -202,8 +224,23 @@ def consume_test_banner() -> bool:
 # ACK
 # ---------------------------------------------------------------------------
 
-_INT_FIELDS = ("rssi", "boot_count", "free_psram_kb", "cycle_ms", "download_ms", "refresh_ms", "cleaned", "offline_s")
-_STR_FIELDS = ("device_id", "hash", "fw_version", "result", "error", "image_format", "wake_reason", "ip")
+_INT_FIELDS = ("rssi", "boot_count", "free_psram_kb", "cycle_ms", "download_ms", "refresh_ms", "cleaned", "offline_s",
+               "meta_ms")
+_STR_FIELDS = ("device_id", "hash", "fw_version", "result", "error", "image_format", "wake_reason", "reset_reason", "ip")
+
+# Warum der Chip gestartet ist (Firmware ab 1.3.0). Nur die Abstürze sind ein Ereignis wert.
+RESET_LABELS = {
+    "poweron": "eingeschaltet",
+    "external": "Reset-Taste",
+    "restart": "Neustart (Firmware, z. B. nach einem Update)",
+    "panic": "Absturz",
+    "task_wdt": "Watchdog (eine Phase hing)",
+    "int_wdt": "Watchdog (Interrupt)",
+    "wdt": "Watchdog",
+    "brownout": "Unterspannung",
+    "deepsleep": "Aufwachen",
+}
+CRASH_RESETS = frozenset({"panic", "task_wdt", "int_wdt", "wdt", "brownout"})
 
 
 def normalize_ack(body: dict, remote: str | None) -> dict:

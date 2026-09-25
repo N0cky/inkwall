@@ -283,6 +283,9 @@ DEFAULT_DEVICE_CYCLE_S = 40     # Aufwachen → WLAN → Download → Anzeige �
 MIN_WAKE_S = 10
 
 
+DEFAULT_DEVICE_PRE_META_S = 8  # Aufwachen → WLAN → meta.json, solange keine Messung da ist
+
+
 def _device_cycle_seconds() -> int:
     """Dauer eines Gerätezyklus aus der letzten Rückmeldung (cycle_ms), sonst der Standardwert."""
     try:
@@ -290,6 +293,18 @@ def _device_cycle_seconds() -> int:
     except (TypeError, ValueError):
         return DEFAULT_DEVICE_CYCLE_S
     return int(min(180, max(5, round(seconds))))
+
+
+def _device_pre_meta_seconds() -> int:
+    """
+    Zeit vom Aufwachen bis zur Anfrage an meta.json (meta_ms, Firmware ab 1.3.0).
+    Mehr muss der Server nicht einrechnen, wenn das Gerät die Zeit danach selbst abzieht.
+    """
+    try:
+        seconds = int(_last_ack.get("meta_ms")) / 1000.0
+    except (TypeError, ValueError):
+        return DEFAULT_DEVICE_PRE_META_S
+    return int(min(60, max(2, round(seconds))))
 
 
 def _aligned_rotation_wake(rotation_seconds: int, now: float | None = None, cycle_seconds: int | None = None) -> tuple[int, float]:
@@ -311,11 +326,14 @@ def _aligned_rotation_wake(rotation_seconds: int, now: float | None = None, cycl
     return int(round(seconds)), float(boundary)
 
 
-def _rotation_wake() -> tuple[int, str]:
-    """Wake-Intervall eines Idle-Bilds: Slot-Grenze der Rotation, Zeitplan-Grenzen gehen vor."""
+def _rotation_wake(from_meta: bool = False) -> tuple[int, str]:
+    """
+    Wake-Intervall eines Idle-Bilds: Slot-Grenze der Rotation, Zeitplan-Grenzen gehen vor.
+    from_meta: das Gerät zieht die Zeit nach meta.json selbst ab, eingerechnet wird nur die davor.
+    """
     from app.config import local_tz
     _, rotation = _get_effective_idle_modules(get_settings_values())
-    seconds, boundary = _aligned_rotation_wake(rotation)
+    seconds, boundary = _aligned_rotation_wake(rotation, cycle_seconds=_device_pre_meta_seconds() if from_meta else None)
     at = datetime.fromtimestamp(boundary, local_tz()).strftime("%H:%M")
     state = _get_schedule_state()
     window = state.get("window")
@@ -331,7 +349,7 @@ def _rotation_wake() -> tuple[int, str]:
     return seconds, f"Idle-Rotation – nächstes Bild um {at}"
 
 
-def _suggest_next_wake(state: str, media_type: str) -> tuple[int, str]:
+def _suggest_next_wake(state: str, media_type: str, from_meta: bool = False) -> tuple[int, str]:
     cfg = get_cfg()
     if media_type == "plex":
         state_parts = state.split(":")
@@ -363,7 +381,7 @@ def _suggest_next_wake(state: str, media_type: str) -> tuple[int, str]:
         if mod.MODULE_PRIORITY < 10:
             return cfg.refresh_interval, f"{mod.MODULE_NAME} aktiv – Refresh-Intervall"
 
-    return _rotation_wake()
+    return _rotation_wake(from_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -1168,7 +1186,10 @@ def meta_json():
     state = current.get("state", "idle")
     fmt   = current.get("format", get_cfg().output_format)
     media_type = current.get("media_type", "idle")
-    next_wake_sec, next_wake_reason = _suggest_next_wake(state, media_type)
+    # Firmware ab 1.3.0 zieht die Zeit ab dieser Antwort selbst ab (Download,
+    # Bildaufbau, ACK): dann nur die Zeit bis zu meta.json einrechnen
+    from_meta = request.args.get("sleep", "") == "from_meta"
+    next_wake_sec, next_wake_reason = _suggest_next_wake(state, media_type, from_meta=from_meta)
     from app.device import firmware_info
     payload = {
         "hash":          current.get("hash", ""),
@@ -1180,6 +1201,8 @@ def meta_json():
         "next_wake_reason": next_wake_reason,
         "image_url":     f"/current.{fmt}",
     }
+    if from_meta:
+        payload["sleep_from"] = "meta"
     # Kompaktes Format: das Gerät bevorzugt es, wenn es angeboten wird
     if fmt == "bmp" and CURRENT_EPD_PATH.exists():
         payload["epd_url"] = "/current.epd"
@@ -1190,6 +1213,8 @@ def meta_json():
         payload["firmware_md5"] = fw["md5"]
         payload["firmware_size"] = fw["size"]
         payload["firmware_url"] = fw["url"]
+        # Ab 1.3.0 spielt das Gerät nur neuere Versionen ein – ausser so erzwungen
+        payload["firmware_force"] = bool(fw.get("force"))
     # Uhrzeit fürs Gerät (Offline-Balken "seit HH:MM"), Panelreinigung, Test des Hinweises
     from app.device import clean_due, consume_test_banner
     now = _get_local_now()
@@ -1259,6 +1284,10 @@ def ack():
         log_event("device", f"Gerät {device} zeigt den Offline-Hinweis zur Probe")
     # Den Test-Auftrag verbraucht allein /meta.json: ein Zyklus, der beim Klick
     # schon lief, darf mit seiner Rückmeldung den frischen Auftrag nicht löschen
+    from app.device import CRASH_RESETS, RESET_LABELS
+    reset_reason = ack_data.get("reset_reason", "")
+    if reset_reason in CRASH_RESETS:
+        log_event("device", f"Gerät {device} ist neu gestartet: {RESET_LABELS.get(reset_reason, reset_reason)}", logging.WARNING)
     rssi = ack_data.get("rssi")
     if isinstance(rssi, int) and rssi < -82:
         log_event("device", f"Gerät {device}: WLAN sehr schwach ({rssi} dBm)", logging.WARNING)
@@ -1375,11 +1404,12 @@ def api_device_firmware_post():
     if upload is None:
         return jsonify({"ok": False, "error": "Bitte eine .bin-Datei auswählen."}), 400
     data = upload.read()
+    force = str(request.form.get("force", "")).strip().lower() in ("1", "true", "on", "yes")
     try:
-        info = store_firmware(data)
+        info = store_firmware(data, force=force)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
-    log_event("device", f"Firmware {info['version']} bereitgestellt – das Gerät holt sie beim nächsten Aufwachen")
+    log_event("device", f"Firmware {info['version']} bereitgestellt{' (erzwungen)' if force else ''} – das Gerät holt sie beim nächsten Aufwachen")
     return jsonify({"ok": True, "firmware": {**info, "url": "/firmware.bin"}})
 
 

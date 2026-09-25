@@ -32,6 +32,7 @@
 #define EPD_HALF_ROW_BYTES (EPD_ROW_BYTES / 2)    // 300
 
 void EPD_Init(void);
-void EPD_Display(const uint8_t* imageBuffer);   // imageBuffer: EPD_ROW_BYTES × EPD_HEIGHT Bytes
-void EPD_Clear(uint8_t color);
+// false: das Panel hat nicht geantwortet (BUSY blieb aktiv) – das Bild steht dann nicht sicher da
+bool EPD_Display(const uint8_t* imageBuffer);   // imageBuffer: EPD_ROW_BYTES × EPD_HEIGHT Bytes
+bool EPD_Clear(uint8_t color);
 void EPD_Sleep(void);

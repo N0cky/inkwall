@@ -130,7 +130,7 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
     module_names = {m.MODULE_ID: m.MODULE_NAME for m in _registry.get_modules()}
     active, seconds_until_change, upcoming = active_window(windows, now_local()) if windows else (None, 0, None)
 
-    from app.device import firmware_info, last_clean_at, rssi_quality, test_banner_pending
+    from app.device import RESET_LABELS, firmware_info, firmware_update_expected, last_clean_at, rssi_quality, test_banner_pending
     fw = firmware_info()
     last_clean = last_clean_at()
     device_fw = str(last_ack.get("fw_version", "") or "")
@@ -144,8 +144,11 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
             "md5":            fw["md5"] if fw else "",
             "uploaded_at":    fw.get("uploaded_at", "") if fw else "",
             "device_version": device_fw,
-            # Update steht an, wenn eine Datei bereitliegt und das Gerät eine andere Version meldet
-            "update_pending": bool(fw) and bool(device_fw) and fw["version"] != device_fw,
+            # Update steht an, wenn das Gerät die bereitgestellte Datei auch einspielt
+            # (ab Firmware 1.3.0 nur neuere Versionen, ausser beim Hochladen erzwungen)
+            "update_pending": firmware_update_expected(fw, device_fw),
+            "not_newer":      bool(fw) and bool(device_fw) and fw["version"] != device_fw and not firmware_update_expected(fw, device_fw),
+            "force":          bool(fw.get("force")) if fw else False,
             "device_supports_ota": bool(device_fw),
         },
         "panel": {
@@ -209,6 +212,8 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
             "refresh_ms":       last_ack.get("refresh_ms"),
             "image_format":     str(last_ack.get("image_format", "") or ""),
             "wake_reason":      str(last_ack.get("wake_reason", "") or ""),
+            "reset_reason":     str(last_ack.get("reset_reason", "") or ""),
+            "reset_label":      RESET_LABELS.get(str(last_ack.get("reset_reason", "") or ""), ""),
             "ip":               str(last_ack.get("ip", "") or ""),
         },
         "content": [_module_entry(m, env, active_id, tiles) for m in ordered],
