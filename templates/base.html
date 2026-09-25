@@ -23,7 +23,7 @@
             --border-strong: rgba(255,255,255,0.13);
             --text:          #f0ede8;
             --text-soft:     #c8c3bb;
-            --muted:         #7d756c;
+            --muted:         #9a9288;   /* ≥ 4,5:1 auf allen dunklen Flächen */
             --accent:        #14b8a6;
             --accent-hover:  #0d9488;
             --accent-dim:    rgba(20,184,166,0.12);
@@ -257,6 +257,7 @@
         .btn.primary:hover { filter: brightness(1.08); color: #062a26; }
         .btn.small { padding: 6px 11px; font-size: 11.5px; }
         .btn:disabled { opacity: .55; cursor: wait; }
+        .btn:focus-visible, .nav-link:focus-visible, .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
         .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px; background: var(--chip-bg); }
         .seg label { padding: 7px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 800; cursor: pointer; color: var(--text-soft); }
@@ -300,7 +301,8 @@
         .field .check { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface2); font-size: 13px; cursor: pointer; }
         .field .check input { accent-color: var(--accent); width: 15px; height: 15px; }
         .field .prio { display: grid; gap: 6px; }
-        .field .prio-item { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface2); }
+        .field .prio-item { display: grid; grid-template-columns: 18px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface2); }
+        .field .prio-item .move { display: inline-flex; gap: 4px; }
         .field .prio-item.dragging { opacity: .4; }
         .field .prio-item .handle { color: var(--muted); cursor: grab; }
         .field .prio-item .rank { font-size: 11px; font-weight: 800; color: var(--accent); }
@@ -358,10 +360,10 @@
 
         <div class="topbar-center">
             <nav class="nav-links" aria-label="Hauptnavigation">
-                <a href="/" class="nav-link {% if active_page == 'display' %}active{% endif %}">Anzeige</a>
-                <a href="/inhalte" class="nav-link {% if active_page == 'content' %}active{% endif %}">Inhalte</a>
-                <a href="/geraet" class="nav-link {% if active_page == 'device' %}active{% endif %}">Gerät</a>
-                <a href="/system" class="nav-link {% if active_page == 'system' %}active{% endif %}">System</a>
+                <a href="/" class="nav-link {% if active_page == 'display' %}active{% endif %}"{% if active_page == 'display' %} aria-current="page"{% endif %}>Anzeige</a>
+                <a href="/inhalte" class="nav-link {% if active_page == 'content' %}active{% endif %}"{% if active_page == 'content' %} aria-current="page"{% endif %}>Inhalte</a>
+                <a href="/geraet" class="nav-link {% if active_page == 'device' %}active{% endif %}"{% if active_page == 'device' %} aria-current="page"{% endif %}>Gerät</a>
+                <a href="/system" class="nav-link {% if active_page == 'system' %}active{% endif %}"{% if active_page == 'system' %} aria-current="page"{% endif %}>System</a>
             </nav>
             {% block topbar_center %}{% endblock %}
         </div>

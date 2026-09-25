@@ -8,8 +8,9 @@
 .cols { display: grid; grid-template-columns: minmax(0, 7fr) minmax(280px, 5fr); gap: 20px; align-items: start; }
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .themes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
-.theme { border: 2px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; background: var(--surface3); }
+.theme { display: block; width: 100%; padding: 0; text-align: left; font: inherit; color: inherit; border: 2px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; background: var(--surface3); }
 .theme.selected { border-color: var(--accent); }
+.theme:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .theme img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; background: var(--surface3); }
 .theme .name { font-size: 12px; font-weight: 800; padding: 8px 10px; display: flex; justify-content: space-between; }
 .kv { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
@@ -21,7 +22,8 @@
 .stat .n { font-size: 18px; font-weight: 800; }
 .stat .l { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .chart { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 12px; background: var(--surface3); }
-.acks { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+.table-scroll { overflow-x: auto; margin-top: 10px; }
+.acks { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .acks th, .acks td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .acks th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .acks td.r, .acks th.r { text-align: right; font-variant-numeric: tabular-nums; }
@@ -133,8 +135,13 @@ details[open] summary { margin-bottom: 8px; }
     }
 
     async function loadForm() {
-        var s = await loadSettings();
-        renderDevice(s); renderNotify(s);
+        try {
+            var s = await loadSettings();
+            renderDevice(s); renderNotify(s);
+        } catch (e) {
+            var msg = '<div class="hint">Einstellungen nicht ladbar: ' + esc(e.message) + '</div>';
+            $('deviceForm').innerHTML = msg; $('notifyForm').innerHTML = msg;
+        }
     }
 
     /* Beide Karten schreiben in dieselben Framework-Einstellungen, jede nur ihre eigenen Felder */
@@ -153,7 +160,7 @@ details[open] summary { margin-bottom: 8px; }
         save: async function () {
             await saveFramework($('deviceForm'), $('deviceBanner'));
             ui.toast('Gespeichert. Das Bild wird neu erzeugt.', 'ok', 4000);
-            setTimeout(loadClient, 3000);
+            setTimeout(function () { refreshClient(); }, 3000);
         },
         discard: async function () { renderDevice(await loadSettings()); }
     });
@@ -168,11 +175,13 @@ details[open] summary { margin-bottom: 8px; }
     function renderThemes() {
         var state = window.__display || null;
         var active = state && state.current && state.current.module_id ? state.current.module_id : '';
+        // Knöpfe statt div: per Tastatur wählbar, aria-pressed sagt, welches gewählt ist
         $('themes').innerHTML = THEMES.map(function (t) {
             var src = active && active !== 'none' ? '/api/preview/' + encodeURIComponent(active) + '.png?theme=' + t[0] + '&device=1' : '';
-            return '<div class="theme" data-theme="' + t[0] + '">' + (src ? '<img alt="Vorschau ' + esc(t[1]) + '" loading="lazy" src="' + esc(src) + '">' : '<div class="hint" style="padding:20px">Kein Bild</div>')
-                + '<div class="name"><span>' + esc(t[1]) + '</span><span class="chip" data-chip="' + t[0] + '"></span></div></div>';
+            return '<button type="button" class="theme" data-theme="' + t[0] + '" aria-pressed="false">' + (src ? '<img alt="Vorschau ' + esc(t[1]) + '" data-src="' + esc(src) + '">' : '<span class="hint" style="display:block;padding:20px">Kein Bild</span>')
+                + '<span class="name"><span>' + esc(t[1]) + '</span><span class="chip" data-chip="' + t[0] + '"></span></span></button>';
         }).join('');
+        loadThemeImages();
         markThemes();
         document.querySelectorAll('.theme').forEach(function (el) {
             el.addEventListener('click', function () {
@@ -184,10 +193,22 @@ details[open] summary { margin-bottom: 8px; }
         });
     }
 
+    /* Jede Vorschau rendert ein ganzes Bild – nacheinander statt drei auf einmal,
+       damit sie nicht gleichzeitig Server-Threads belegen */
+    function loadThemeImages() {
+        var imgs = Array.from(document.querySelectorAll('.theme img[data-src]'));
+        (function next() {
+            var img = imgs.shift(); if (!img) return;
+            img.onload = img.onerror = next;
+            img.src = img.getAttribute('data-src'); img.removeAttribute('data-src');
+        })();
+    }
+
     function markThemes() {
         document.querySelectorAll('.theme').forEach(function (el) {
             var on = el.getAttribute('data-theme') === currentTheme;
             el.classList.toggle('selected', on);
+            el.setAttribute('aria-pressed', String(on));
             var chip = el.querySelector('[data-chip]'); chip.textContent = on ? 'gewählt' : ''; chip.className = 'chip' + (on ? ' accent' : '');
         });
     }
@@ -254,6 +275,10 @@ details[open] summary { margin-bottom: 8px; }
         return parts.join('');
     }
 
+    // Abfragen ohne Stapeln, nicht im Hintergrund-Tab, bei totem Server mit wachsender Pause
+    var refreshClient = ui.poll(loadClient, 30000);
+    var refreshHistory = ui.poll(loadHistory, 60000);
+
     async function loadHistory() {
         var hours = (document.querySelector('input[name="histRange"]:checked') || {}).value || '24';
         var box = $('history');
@@ -271,15 +296,15 @@ details[open] summary { margin-bottom: 8px; }
                 + '</div>' + chartSvg(entries, h.expected_seconds)
                 + '<div class="hint" style="margin-top:6px">Linie: WLAN-Signal in dBm (oben = besser), Balken: Zyklusdauer, rote Punkte: Fehler. Lücken in der Linie sind Pausen über dem Dreifachen des Takts.</div>';
             var last = entries.slice(-10).reverse();
-            html += '<table class="acks"><tr><th>Zeit</th><th>Ergebnis</th><th class="r">WLAN</th><th class="r">Zyklus</th><th class="r">Download</th><th class="r">Anzeige</th></tr>'
+            html += '<div class="table-scroll"><table class="acks"><tr><th>Zeit</th><th>Ergebnis</th><th class="r">WLAN</th><th class="r">Zyklus</th><th class="r">Download</th><th class="r">Anzeige</th></tr>'
                 + last.map(function (e) {
                     var res = e.result === 'updated' ? '<span class="chip ok">neues Bild</span>' : e.result === 'unchanged' ? '<span class="chip">unverändert</span>' : e.result === 'error' ? '<span class="chip danger" title="' + esc(e.error || '') + '">Fehler</span>' : '<span class="chip">' + esc(e.result) + '</span>';
                     return '<tr><td>' + esc(ui.fmtDateTime(e.t)) + '</td><td>' + res + '</td><td class="r">' + (e.rssi != null ? esc(e.rssi + ' dBm') : '–') + '</td><td class="r">' + (e.cycle_ms != null ? (e.cycle_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.download_ms != null ? (e.download_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.refresh_ms != null ? (e.refresh_ms / 1000).toFixed(1) + ' s' : '–') + '</td></tr>';
-                }).join('') + '</table>';
+                }).join('') + '</table></div>';
             box.innerHTML = html;
-        } catch (e) { box.innerHTML = '<div class="hint">Verlauf nicht ladbar.</div>'; }
+        } catch (e) { box.innerHTML = '<div class="hint">Verlauf nicht ladbar.</div>'; throw e; }
     }
-    document.querySelectorAll('input[name="histRange"]').forEach(function (r) { r.addEventListener('change', loadHistory); });
+    document.querySelectorAll('input[name="histRange"]').forEach(function (r) { r.addEventListener('change', function () { refreshHistory(); }); });
 
     async function loadClient() {
         try {
@@ -332,7 +357,7 @@ details[open] summary { margin-bottom: 8px; }
             var tb = $('testBanner');
             if (tb) tb.addEventListener('click', async function () {
                 tb.disabled = true;
-                try { await ui.json('/api/device/test-banner', { method: 'POST' }); ui.toast('Das Gerät zeigt den Offline-Hinweis beim nächsten Aufwachen und danach wieder das normale Bild.', 'ok', 6000); loadClient(); }
+                try { await ui.json('/api/device/test-banner', { method: 'POST' }); ui.toast('Das Gerät zeigt den Offline-Hinweis beim nächsten Aufwachen und danach wieder das normale Bild.', 'ok', 6000); refreshClient(); }
                 catch (e) { ui.toast('Konnte nicht anfordern: ' + e.message, 'error'); tb.disabled = false; }
             });
             renderFirmware(s.firmware);
@@ -343,7 +368,7 @@ details[open] summary { margin-bottom: 8px; }
                 + kv('Server prüft alle', esc(st.background_poll_sec + ' s'))
                 + kv('Endpunkte', ['/current.png', '/current.bmp', '/current.epd', '/meta.json', '/hash', '/firmware.json', '/health'].map(function (p) { return '<a class="mono" href="' + p + '" target="_blank" rel="noreferrer">' + p + '</a>'; }).join('<br>'));
             if (!document.querySelector('.theme img')) renderThemes();
-        } catch (e) { $('client').innerHTML = '<div class="hint">Server nicht erreichbar.</div>'; }
+        } catch (e) { $('client').innerHTML = '<div class="hint">Server nicht erreichbar.</div>'; throw e; }
     }
 
     function renderFirmware(fw) {
@@ -375,19 +400,20 @@ details[open] summary { margin-bottom: 8px; }
             ui.toast('Firmware ' + data.firmware.version + ' bereitgestellt. Das Gerät holt sie beim nächsten Aufwachen.', 'ok', 6000);
             input.value = '';
             $('fwForce').checked = false;
-            loadClient();
+            refreshClient();
         } catch (e) { ui.toast('Nicht übernommen: ' + e.message, 'error', 6000); }
         btn.disabled = false; btn.textContent = 'Hochladen';
     });
 
     $('fwDelete').addEventListener('click', async function () {
-        try { await ui.json('/api/device/firmware', { method: 'DELETE' }); ui.toast('Firmware entfernt.', 'ok'); loadClient(); }
+        try { await ui.json('/api/device/firmware', { method: 'DELETE' }); ui.toast('Firmware entfernt.', 'ok'); refreshClient(); }
         catch (e) { ui.toast('Konnte nicht entfernen: ' + e.message, 'error'); }
     });
 
-    loadForm().then(loadClient).then(loadHistory);
-    setInterval(loadClient, 30000);
-    setInterval(loadHistory, 60000);
+    // Unabhängig voneinander: scheitert eine Anfrage, laden die anderen Karten trotzdem
+    loadForm();
+    refreshClient();
+    refreshHistory();
 })();
 </script>
 {% endblock %}

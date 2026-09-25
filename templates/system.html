@@ -75,7 +75,7 @@
                     <label class="hint" style="display:inline-flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="exportSecrets"> mit Passwörtern und Tokens</label></div>
                     <button class="btn" type="button" id="exportBtn">Herunterladen</button></div>
                 <div class="maint-row"><div><b>Einstellungen wiederherstellen</b><div class="hint">Eine gesicherte Datei einspielen. Unbekannte Werte werden übersprungen, leere Passwörter überschreiben nichts.</div></div>
-                    <label class="btn" for="importFile">Datei wählen<input type="file" id="importFile" accept="application/json,.json" hidden></label></div>
+                    <button class="btn" type="button" id="importBtn">Datei wählen</button><input type="file" id="importFile" accept="application/json,.json" hidden></div>
                 <div class="maint-row"><div><b>Module neu laden</b><div class="hint">Liest den Ordner <span class="mono">modules/</span> neu ein, ohne Neustart.</div></div>
                     <button class="btn" type="button" id="rescanBtn">Neu laden</button></div>
                 <div class="maint-row"><div><b>Zugangsschutz</b><div class="hint">Setze die Umgebungsvariable <span class="mono">INKWALL_UI_PASSWORD</span> im Container, um diese Oberfläche mit Passwort zu schützen. Das Display braucht kein Passwort.</div></div>
@@ -139,7 +139,8 @@
     });
     var searchTimer = null;
     $('search').addEventListener('input', function () { clearTimeout(searchTimer); searchTimer = setTimeout(loadLogs, 300); });
-    function schedule() { if (timer) clearInterval(timer); if ($('autoRefresh').checked) timer = setInterval(loadLogs, 15000); }
+    // Nicht im Hintergrund-Tab abfragen
+    function schedule() { if (timer) clearInterval(timer); if ($('autoRefresh').checked) timer = setInterval(function () { if (!document.hidden) loadLogs(); }, 15000); }
     $('autoRefresh').addEventListener('change', schedule);
 
     /* ── Zeit & Takt ── */
@@ -177,6 +178,8 @@
             a.download = 'inkwall-settings-' + new Date().toISOString().slice(0, 10) + '.json'; a.click();
         } catch (e) { ui.toast('Export fehlgeschlagen: ' + e.message, 'error'); }
     });
+    // Ein Knopf statt eines Labels am versteckten Dateifeld: nur so per Tastatur erreichbar
+    $('importBtn').addEventListener('click', function () { $('importFile').click(); });
     $('importFile').addEventListener('change', async function () {
         var file = this.files && this.files[0]; if (!file) return;
         try {

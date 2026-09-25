@@ -184,21 +184,31 @@
     var state = null;          // letzter Serverstand
     var draft = null;          // Arbeitskopie
     var dirty = false;
+    var edits = 0;             // zählt Änderungen am Entwurf – Speichern erkennt so Eingaben während der Anfrage
     var previewModule = null;  // id, wenn eine Vorschau statt des Displays gezeigt wird
     var nextAt = null;         // Zeitpunkt (ms) des nächsten Bildwechsels für den Countdown
+    var loadSeq = 0;           // laufende Nummer jeder Abfrage …
+    var staleUpTo = 0;         // … bis zu der Antworten veraltet sind (gingen vor dem letzten Speichern los)
 
     var $ = function (id) { return document.getElementById(id); };
+    function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
     /* ── Laden ── */
     async function load() {
+        var seq = ++loadSeq, data;
         try {
-            state = await ui.json('/api/display');
-            $('serverChip').className = 'chip ok';
-            if (!dirty) { draft = JSON.parse(JSON.stringify(state)); render(); }
-            renderShot();
+            data = await ui.json('/api/display');
         } catch (e) {
             $('serverChip').className = 'chip danger';
             $('nowLine').textContent = 'Server nicht erreichbar';
+            throw e;
+        }
+        $('serverChip').className = 'chip ok';
+        // Eine Abfrage, die vor dem Speichern losging, kennt die neuen Werte noch nicht
+        if (seq > staleUpTo) {
+            state = data;
+            if (!dirty) { draft = clone(state); render(); }
+            renderShot();
         }
         loadHistory();
     }
@@ -233,6 +243,7 @@
     }
 
     function showHistory(entry) {
+        cancelPreview();
         previewModule = 'history:' + entry.id;
         historyId = entry.id;
         $('shotTitle').textContent = 'Verlauf';
@@ -265,28 +276,53 @@
         }
         nextAt = Date.now() + (nxt.seconds || 0) * 1000;
         tickNext();
-        if (!previewModule) refreshImage('/current.png');
+        if (!previewModule) showCurrentImage();
     }
 
+    /* Ist der Countdown abgelaufen, einmal nachfragen – nicht jede Sekunde, auch wenn
+       der Server wieder 0 s meldet (Gerät überfällig) oder gar nicht antwortet */
+    var countdownFor = null, countdownAt = 0;
     function tickNext() {
         if (!state || previewModule) return;
         var remaining = (nextAt - Date.now()) / 1000;
         $('nextLine').innerHTML = 'Nächstes Bild in <b>' + esc(ui.mmss(remaining)) + '</b>' + (state.next.reason ? ' <span class="hint">· ' + esc(state.next.reason) + '</span>' : '');
-        if (remaining <= 0) { load(); }
+        if (remaining <= 0 && countdownFor !== nextAt && Date.now() - countdownAt > 15000 && !document.hidden) {
+            countdownFor = nextAt; countdownAt = Date.now();
+            refresh();
+        }
     }
     setInterval(tickNext, 1000);
 
-    function refreshImage(url) {
+    /* Das aktuelle Bild nur neu holen, wenn es ein anderes ist (Hash) – sonst lädt jede Abfrage das PNG erneut */
+    var shownHash = null;
+    function showCurrentImage() {
+        var hash = state.current.hash || String(Date.now());
+        if (hash === shownHash) return;
+        shownHash = hash;
         var shot = $('shotLink'), img = $('shotImg');
+        var src = '/current.png?h=' + encodeURIComponent(hash);
         shot.classList.add('loading');
-        var src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now();
         var tmp = new Image();
-        tmp.onload = function () { img.src = src; shot.href = src; shot.classList.remove('loading'); };
-        tmp.onerror = function () { shot.classList.remove('loading'); };
+        tmp.onload = function () {
+            if (previewModule) return;   // inzwischen läuft eine Vorschau – die gewinnt
+            img.src = src; shot.href = src; shot.classList.remove('loading');
+        };
+        tmp.onerror = function () { shownHash = null; if (!previewModule) shot.classList.remove('loading'); };
         tmp.src = src;
     }
 
+    /* Jede Vorschau hat ihre Nummer: eine ältere Antwort (erst A, dann B geklickt)
+       oder eine nach „Zurück zum Display“ wird verworfen, die Anfrage abgebrochen */
+    var previewSeq = 0, previewAbort = null, previewUrl = null;
+    function cancelPreview() {
+        previewSeq++;
+        if (previewAbort) { previewAbort.abort(); previewAbort = null; }
+        shownHash = null;
+    }
+
     async function showPreview(id, name) {
+        cancelPreview();
+        var seq = previewSeq, abort = previewAbort = new AbortController();
         previewModule = id;
         if (historyId) { historyId = null; renderHistory(); }
         $('shotTitle').textContent = 'Vorschau';
@@ -296,23 +332,31 @@
         $('nextLine').textContent = '';
         $('backBtn').hidden = false;
         $('shotLink').classList.add('loading');
-        var url = '/api/preview/' + encodeURIComponent(id) + '.png?' + ($('deviceSim').checked ? 'device=1&' : '') + 't=' + Date.now();
+        var sim = $('deviceSim').checked;
+        var url = '/api/preview/' + encodeURIComponent(id) + '.png?' + (sim ? 'device=1&' : '') + 't=' + Date.now();
         try {
-            var r = await fetch(url);
+            var r = await fetch(url, { signal: abort.signal });
             if (!r.ok) {
                 var j = null; try { j = await r.json(); } catch (e) {}
+                if (seq !== previewSeq) return;
                 $('sinceLine').textContent = (j && j.error) || ('Fehler ' + r.status);
             } else {
                 var blob = await r.blob();
-                var objectUrl = URL.createObjectURL(blob);
-                $('shotImg').src = objectUrl; $('shotLink').href = objectUrl;
-                $('sinceLine').textContent = 'So würde ' + name + ' aussehen' + ($('deviceSim').checked ? ' (6 Farben)' : '') + '.';
+                if (seq !== previewSeq) return;
+                if (previewUrl) URL.revokeObjectURL(previewUrl);
+                previewUrl = URL.createObjectURL(blob);
+                $('shotImg').src = previewUrl; $('shotLink').href = previewUrl;
+                $('sinceLine').textContent = 'So würde ' + name + ' aussehen' + (sim ? ' (6 Farben)' : '') + '.';
             }
-        } catch (e) { $('sinceLine').textContent = 'Vorschau fehlgeschlagen'; }
+        } catch (e) {
+            if (seq !== previewSeq) return;
+            $('sinceLine').textContent = 'Vorschau fehlgeschlagen';
+        }
         $('shotLink').classList.remove('loading');
     }
 
     function backToDisplay() {
+        cancelPreview();
         previewModule = null;
         if (historyId) { historyId = null; renderHistory(); }
         $('shotTitle').textContent = 'Jetzt auf dem Display';
@@ -349,18 +393,45 @@
             '<span class="height ' + (dash && m.enabled ? '' : 'hidden') + '"><input type="number" min="5" max="100" placeholder="auto" value="' + (m.height ? esc(m.height) : '') + '" data-id="' + esc(m.id) + '" aria-label="Höhe in Prozent"' + (m.tile_supported ? '' : ' disabled title="Keine Kachel-Darstellung"') + '> %</span>';
         var actions = '<span class="row-actions">'
             + (m.status.state === 'missing' ? '<a class="btn small" href="/inhalte#' + esc(m.id) + '">Einrichten</a>' : '<button class="btn small" type="button" data-preview="' + esc(m.id) + '">Vorschau</button>')
+            + (isLive ? '' : moveButtons(m.name, 'data-move'))
             + '</span>';
         var noTile = (dash && !isLive && m.enabled && !m.tile_supported) ? ' <span class="chip warn">keine Kachel</span>' : '';
         return '<div class="row ' + (m.enabled ? '' : 'off') + (isLive ? ' nodrag' : '') + '" draggable="' + (isLive ? 'false' : 'true') + '" data-id="' + esc(m.id) + '">'
-            + '<span class="handle" title="Ziehen zum Sortieren">⠿</span>'
-            + '<label class="switch"><input type="checkbox" data-toggle="' + esc(m.id) + '" ' + (m.enabled ? 'checked' : '') + (canEnable ? '' : ' disabled title="Erst einrichten"') + '><span class="track"></span></label>'
+            + '<span class="handle" title="Ziehen zum Sortieren" aria-hidden="true">⠿</span>'
+            + '<label class="switch"><input type="checkbox" data-toggle="' + esc(m.id) + '" aria-label="' + esc(m.name) + (isLive ? ' einschalten' : ' anzeigen') + '" ' + (m.enabled ? 'checked' : '') + (canEnable ? '' : ' disabled title="Erst einrichten"') + '><span class="track"></span></label>'
             + '<div class="row-main"><div class="row-name">' + esc(m.name) + ' ' + chipFor(m) + noTile + '</div>'
             + (m.summary ? '<div class="row-sum" title="' + esc(m.summary) + '">' + esc(m.summary) + '</div>' : '') + '</div>'
             + heightHtml + actions + '</div>';
     }
 
+    /* ↑/↓ neben dem Ziehgriff: Sortieren mit Tastatur und auf dem Handy */
+    function moveButtons(name, attr) {
+        return '<button class="btn small" type="button" ' + attr + '="-1" aria-label="' + esc(name) + ' nach oben">↑</button>'
+            + '<button class="btn small" type="button" ' + attr + '="1" aria-label="' + esc(name) + ' nach unten">↓</button>';
+    }
+
+    /* Die Zeilen entstehen bei jeder Änderung neu – der Tastaturfokus soll dabei
+       auf demselben Schalter oder Feld bleiben statt an den Seitenanfang zu springen */
+    var FOCUS_ATTRS = ['data-toggle', 'data-preview', 'data-edit-win', 'data-del-win', 'data-wf', 'data-day', 'data-days', 'data-wc', 'data-wh'];
+    function focusSelector() {
+        var el = document.activeElement;
+        if (!el || !el.closest || !el.closest('#contentRows, #liveRows, #windowRows')) return null;
+        for (var i = 0; i < FOCUS_ATTRS.length; i++) {
+            if (el.hasAttribute(FOCUS_ATTRS[i])) return '[' + FOCUS_ATTRS[i] + '="' + CSS.escape(el.getAttribute(FOCUS_ATTRS[i])) + '"]';
+        }
+        if (el.matches('.height input')) return '.height input[data-id="' + CSS.escape(el.getAttribute('data-id')) + '"]';
+        if (el.type === 'radio') return 'input[name="' + CSS.escape(el.name) + '"][value="' + CSS.escape(el.value) + '"]';
+        return null;
+    }
+    function restoreFocus(selector) {
+        if (!selector) return;
+        var el = document.querySelector(selector);
+        if (el && el !== document.activeElement) el.focus({ preventScroll: true });
+    }
+
     function render() {
         if (!draft) return;
+        var focus = focusSelector();
         var anythingOn = draft.content.some(function (m) { return m.enabled; }) || draft.live.some(function (m) { return m.enabled; });
         $('emptyHint').hidden = anythingOn;
         $('layoutRotation').checked = draft.layout === 'rotation';
@@ -378,6 +449,7 @@
         renderSchedule();
         bindRows();
         syncBar();
+        restoreFocus(focus);
     }
 
     /* Die Speicherleiste folgt dem Entwurf: „Gespeichert“ bleibt stehen, bis wieder etwas geändert wird */
@@ -411,7 +483,14 @@
         el.className = cls; el.textContent = text; el.hidden = false;
     }
 
-    function markDirty() { dirty = true; render(); }
+    function touch() { dirty = true; edits++; }
+    function markDirty() { touch(); render(); }
+
+    /* Nach dem Verschieben liegt die Zeile woanders – der Fokus geht mit dem Knopf mit */
+    function focusMoved(rowSelector, attr, step) {
+        var btn = document.querySelector(rowSelector + ' [' + attr + '="' + step + '"]');
+        if (btn) btn.focus({ preventScroll: true });
+    }
 
     function bindRows() {
         document.querySelectorAll('[data-toggle]').forEach(function (cb) {
@@ -421,16 +500,26 @@
         });
         document.querySelectorAll('.height input').forEach(function (inp) {
             inp.addEventListener('input', function () {
-                var m = findModule(inp.getAttribute('data-id')); if (m) { m.height = inp.value ? parseInt(inp.value, 10) : null; dirty = true; syncBar(); renderHeightSum(); }
+                var m = findModule(inp.getAttribute('data-id')); if (m) { m.height = inp.value ? parseInt(inp.value, 10) : null; touch(); syncBar(); renderHeightSum(); }
             });
         });
         document.querySelectorAll('[data-preview]').forEach(function (b) {
             b.addEventListener('click', function () { var m = findModule(b.getAttribute('data-preview')); showPreview(m.id, m.name); });
         });
+        document.querySelectorAll('#contentRows [data-move]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var id = b.closest('.row').getAttribute('data-id'), step = +b.getAttribute('data-move');
+                var from = draft.content.findIndex(function (m) { return m.id === id; }), to = from + step;
+                if (from < 0 || to < 0 || to >= draft.content.length) return;
+                draft.content.splice(to, 0, draft.content.splice(from, 1)[0]);
+                markDirty();
+                focusMoved('#contentRows .row[data-id="' + CSS.escape(id) + '"]', 'data-move', step);
+            });
+        });
         /* Drag & Drop für die Reihenfolge */
         var dragId = null;
         document.querySelectorAll('#contentRows .row').forEach(function (row) {
-            row.addEventListener('dragstart', function (e) { dragId = row.getAttribute('data-id'); row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+            row.addEventListener('dragstart', function (e) { dragId = row.getAttribute('data-id'); row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragId); });
             row.addEventListener('dragend', function () { row.classList.remove('dragging'); document.querySelectorAll('.row.over').forEach(function (r) { r.classList.remove('over'); }); });
             row.addEventListener('dragover', function (e) { e.preventDefault(); row.classList.add('over'); });
             row.addEventListener('dragleave', function () { row.classList.remove('over'); });
@@ -500,19 +589,22 @@
             if (live.source === 'night') text += ' Das Fenster „Nachts“ stammt aus dem alten Nachtmodus und wird beim Speichern in den Zeitplan übernommen.';
             hint.textContent = text;
         }
+        var focus = focusSelector();
         $('windowRows').innerHTML = wins.map(function (w, i) { return windowRowHtml(w, i); }).join('');
         bindWindowRows();
+        restoreFocus(focus);
     }
 
     function windowRowHtml(w, i) {
         var summary = windowSummary(w);
         var head = '<div class="row window-row" draggable="true" data-win="' + i + '">'
-            + '<span class="handle" title="Ziehen zum Sortieren">⠿</span>'
+            + '<span class="handle" title="Ziehen zum Sortieren" aria-hidden="true">⠿</span>'
             + '<span class="win-time">' + esc(w.start) + '<br>' + esc(w.end) + '</span>'
             + '<div class="row-main"><div class="row-name">' + esc(w.name) + (!dirty && w.active ? ' <span class="chip accent"><span class="dot"></span>jetzt aktiv</span>' : '') + '</div>'
             + '<div class="row-sum" title="' + esc(summary) + '">' + esc(summary) + '</div></div>'
-            + '<span class="row-actions"><button class="btn small" type="button" data-edit-win="' + i + '">' + (editingWindow === i ? 'Fertig' : 'Bearbeiten') + '</button>'
-            + '<button class="btn small" type="button" data-del-win="' + i + '">Löschen</button></span></div>';
+            + '<span class="row-actions"><button class="btn small" type="button" data-edit-win="' + i + '" aria-expanded="' + (editingWindow === i) + '" aria-label="' + esc(w.name) + (editingWindow === i ? ' fertig bearbeiten' : ' bearbeiten') + '">' + (editingWindow === i ? 'Fertig' : 'Bearbeiten') + '</button>'
+            + '<button class="btn small" type="button" data-del-win="' + i + '" aria-label="' + esc(w.name) + ' löschen">Löschen</button>'
+            + (draft.schedule.windows.length > 1 ? moveButtons(w.name, 'data-win-move') : '') + '</span></div>';
         return editingWindow === i ? head + windowEditorHtml(w, i) : head;
     }
 
@@ -546,7 +638,7 @@
     }
 
     function markDirtySchedule(rerender) {
-        dirty = true; syncBar();
+        touch(); syncBar();
         if (rerender) renderSchedule();
     }
 
@@ -556,7 +648,21 @@
             b.addEventListener('click', function () { var i = +b.getAttribute('data-edit-win'); editingWindow = editingWindow === i ? -1 : i; renderSchedule(); });
         });
         document.querySelectorAll('[data-del-win]').forEach(function (b) {
-            b.addEventListener('click', function () { wins.splice(+b.getAttribute('data-del-win'), 1); editingWindow = -1; markDirty(); });
+            b.addEventListener('click', function () {
+                wins.splice(+b.getAttribute('data-del-win'), 1); editingWindow = -1; markDirty();
+                // Die Zeile ist weg – der Fokus landet auf dem Knopf für neue Fenster statt am Seitenanfang
+                $('addWindowBtn').focus({ preventScroll: true });
+            });
+        });
+        document.querySelectorAll('[data-win-move]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var from = +b.closest('.window-row').getAttribute('data-win'), step = +b.getAttribute('data-win-move'), to = from + step;
+                if (to < 0 || to >= wins.length) return;
+                wins.splice(to, 0, wins.splice(from, 1)[0]);
+                if (editingWindow === from) editingWindow = to; else if (editingWindow === to) editingWindow = from;
+                markDirty();
+                focusMoved('#windowRows .window-row[data-win="' + to + '"]', 'data-win-move', step);
+            });
         });
         var ed = document.querySelector('[data-win-edit]');
         if (ed) {
@@ -598,7 +704,7 @@
         }
         var dragFrom = null;
         document.querySelectorAll('#windowRows .window-row').forEach(function (row) {
-            row.addEventListener('dragstart', function (e) { dragFrom = +row.getAttribute('data-win'); row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+            row.addEventListener('dragstart', function (e) { dragFrom = +row.getAttribute('data-win'); row.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(dragFrom)); });
             row.addEventListener('dragend', function () { row.classList.remove('dragging'); document.querySelectorAll('.row.over').forEach(function (r) { r.classList.remove('over'); }); });
             row.addEventListener('dragover', function (e) { e.preventDefault(); row.classList.add('over'); });
             row.addEventListener('dragleave', function () { row.classList.remove('over'); });
@@ -646,6 +752,7 @@
     }
 
     async function saveAll() {
+        var before = edits;
         var payload = {
             layout: draft.layout,
             rotation_seconds: draft.rotation_seconds,
@@ -658,8 +765,11 @@
         };
         try {
             var result = await ui.json('/api/display', { method: 'PUT', body: payload });
-            dirty = false; editingWindow = -1; clearErrors();
-            state = result.display; draft = JSON.parse(JSON.stringify(state));
+            staleUpTo = loadSeq;   // Abfragen, die bis jetzt losgingen, liefern noch den alten Stand
+            clearErrors();
+            state = result.display;
+            // Wer während des Speicherns weiter geändert hat, behält seinen Entwurf (die Leiste bleibt „nicht gespeichert“)
+            if (edits === before) { dirty = false; editingWindow = -1; draft = clone(state); }
             render(); renderShot();
             ui.toast('Gespeichert. Das Display holt sich das neue Bild beim nächsten Aufwachen.', 'ok', 4000);
             (result.notices || []).forEach(function (n) { ui.toast(n, 'info', 6000); });
@@ -671,11 +781,12 @@
 
     var bar = fields.savebar($('saveBar'), {
         save: saveAll,
-        discard: function () { dirty = false; editingWindow = -1; draft = JSON.parse(JSON.stringify(state)); clearErrors(); render(); }
+        discard: function () { dirty = false; editingWindow = -1; draft = clone(state); clearErrors(); render(); }
     });
 
-    load();
-    setInterval(load, 30000);
+    // Alle 30 s, nie doppelt, nicht im Hintergrund-Tab, bei totem Server mit wachsender Pause
+    var refresh = ui.poll(load, 30000);
+    refresh();
 })();
 </script>
 {% endblock %}

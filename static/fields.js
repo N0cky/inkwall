@@ -39,9 +39,10 @@ window.fields = (function () {
                 f.options.forEach(function (o) { if (order.indexOf(o[0]) < 0) order.push(o[0]); });
                 var byVal = {}; f.options.forEach(function (o) { byVal[o[0]] = o[1]; });
                 html = '<div class="prio" id="' + id + '"' + attrs + '>' + order.map(function (v) {
-                    return '<div class="prio-item" draggable="true" data-value="' + esc(v) + '"><span class="handle">⠿</span>'
-                        + '<label class="check"><input type="checkbox" value="' + esc(v) + '"' + (f.value.indexOf(v) >= 0 ? ' checked' : '') + '><span>' + esc(byVal[v] || v) + '</span></label>'
-                        + '<span class="rank"></span></div>';
+                    var name = byVal[v] || v;
+                    return '<div class="prio-item" draggable="true" data-value="' + esc(v) + '"><span class="handle" aria-hidden="true">⠿</span>'
+                        + '<label class="check"><input type="checkbox" value="' + esc(v) + '"' + (f.value.indexOf(v) >= 0 ? ' checked' : '') + '><span>' + esc(name) + '</span></label>'
+                        + '<span class="rank"></span>' + moveButtons(name) + '</div>';
                 }).join('') + '</div>';
                 break;
             }
@@ -90,6 +91,12 @@ window.fields = (function () {
             + '<div class="field-error" data-error-for="' + esc(f.name) + '"></div></div>';
     }
 
+    /* ↑/↓ zum Sortieren – Ziehen geht nur mit der Maus */
+    function moveButtons(name) {
+        return '<span class="move"><button type="button" class="btn small" data-move="-1" aria-label="' + esc(name) + ' nach oben">↑</button>'
+            + '<button type="button" class="btn small" data-move="1" aria-label="' + esc(name) + ' nach unten">↓</button></span>';
+    }
+
     function listRow(cols, item) {
         return '<div class="list-row" style="grid-template-columns:' + cols.map(function (c) { return c.wide ? '3fr' : '1fr'; }).join(' ') + ' auto">'
             + cols.map(function (c) { return '<input type="text" data-col="' + esc(c.name) + '" value="' + esc((item || {})[c.name] || '') + '" placeholder="' + esc(c.placeholder || c.label || '') + '" aria-label="' + esc(c.label || c.name) + '">'; }).join('')
@@ -127,6 +134,8 @@ window.fields = (function () {
             container._fieldsBound = true;
             container.addEventListener('input', function () { container._fieldsOnChange(); refreshConditional(container); });
             container.addEventListener('change', function () { container._fieldsOnChange(); refreshConditional(container); });
+            // Enter in einem Feld schickt sonst das Formular ab und lädt die Seite neu – die Änderungen wären weg
+            if (container.tagName === 'FORM') container.addEventListener('submit', function (e) { e.preventDefault(); if (container._fieldsOnSubmit) container._fieldsOnSubmit(); });
         }
         refreshConditional(container);
     }
@@ -136,27 +145,37 @@ window.fields = (function () {
        opts.save():    Promise – aufgelöst heißt gespeichert; abgelehnt heißt nicht gespeichert
                        (Fehler an den Feldern zeigt die Seite selbst, den Toast macht die Leiste).
        opts.discard(): stellt den zuletzt geladenen Stand wieder her; ohne discard bleibt „Verwerfen“ verborgen.
-       Rückgabe: { markDirty, markSaved, reset, isDirty, bind(form) } – bind() koppelt ein Formular an die Leiste. */
+       Rückgabe: { markDirty, markSaved, reset, isDirty, edits, bind(form) } – bind() koppelt ein Formular an die Leiste
+       (Enter im Formular speichert). edits() zählt jede Änderung: wer während des Speicherns weitertippt,
+       bleibt „nicht gespeichert“ – die Seite darf dann den Serverstand nicht über das Formular legen. */
     var bars = [];
     function savebar(bar, opts) {
         var stateEl = bar.querySelector('.state'), saveBtn = bar.querySelector('[data-save]'), discardBtn = bar.querySelector('[data-discard]');
-        var dirty = false, saveLabel = saveBtn.textContent;
+        var dirty = false, saving = false, edits = 0, saveLabel = saveBtn.textContent;
+        stateEl.setAttribute('role', 'status');
         function set(text, isDirty) {
             dirty = isDirty; stateEl.textContent = text; bar.classList.toggle('dirty', isDirty);
             if (discardBtn) discardBtn.hidden = !(isDirty && opts.discard);
         }
         var api = {
-            markDirty: function () { if (!dirty) set('Nicht gespeicherte Änderungen', true); },
+            markDirty: function () { edits++; if (!dirty) set('Nicht gespeicherte Änderungen', true); },
             markSaved: function () { set('Gespeichert', false); },
             reset: function () { set('Keine Änderungen', false); },
             isDirty: function () { return dirty; },
-            bind: function (form) { bind(form, api.markDirty); return api; }
+            edits: function () { return edits; },
+            bind: function (form) { form._fieldsOnSubmit = function () { if (dirty && !saving) saveBtn.click(); }; bind(form, api.markDirty); return api; }
         };
         saveBtn.addEventListener('click', async function () {
-            saveBtn.disabled = true; saveBtn.textContent = 'Speichert …';
-            try { await opts.save(); api.markSaved(); }
+            if (saving) return;
+            saving = true; saveBtn.disabled = true; saveBtn.textContent = 'Speichert …';
+            var before = edits;
+            try {
+                await opts.save();
+                if (edits === before) api.markSaved();
+                else set('Gespeichert – danach Geändertes noch nicht', true);
+            }
             catch (e) { ui.toast('Nicht gespeichert', 'error'); }
-            saveBtn.disabled = false; saveBtn.textContent = saveLabel;
+            saving = false; saveBtn.disabled = false; saveBtn.textContent = saveLabel;
         });
         if (discardBtn) discardBtn.addEventListener('click', function () { api.reset(); if (opts.discard) opts.discard(); });
         bars.push(api);
@@ -193,7 +212,16 @@ window.fields = (function () {
         var dragEl = null;
         function ranks() { var r = 1; list.querySelectorAll('.prio-item').forEach(function (it) { var cb = it.querySelector('input'); it.querySelector('.rank').textContent = cb.checked ? 'Prio ' + (r++) : ''; }); }
         list.querySelectorAll('.prio-item').forEach(function (item) {
-            item.addEventListener('dragstart', function () { dragEl = item; item.classList.add('dragging'); });
+            item.querySelectorAll('[data-move]').forEach(function (b) {
+                b.addEventListener('click', function () {
+                    var step = +b.getAttribute('data-move');
+                    var other = step < 0 ? item.previousElementSibling : item.nextElementSibling;
+                    if (!other) return;
+                    if (step < 0) other.before(item); else other.after(item);
+                    b.focus(); ranks(); onChange();
+                });
+            });
+            item.addEventListener('dragstart', function (e) { dragEl = item; item.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', item.getAttribute('data-value')); });
             item.addEventListener('dragend', function () { item.classList.remove('dragging'); });
             item.addEventListener('dragover', function (e) { e.preventDefault(); });
             item.addEventListener('drop', function (e) {
@@ -248,7 +276,13 @@ window.fields = (function () {
         var f = (errors && errors.fields) || {}, general = (errors && errors.general) || [];
         Object.keys(f).forEach(function (name) {
             var el = container.querySelector('[data-error-for="' + name + '"]');
-            if (el) { el.textContent = f[name]; var field = el.closest('.field'); if (field) field.classList.add('has-error'); }
+            if (el) {
+                el.textContent = f[name];
+                var field = el.closest('.field'); if (field) field.classList.add('has-error');
+                // Screenreader: das Feld ist ungültig, und die Meldung gehört zu ihm
+                var control = container.querySelector('#f-' + CSS.escape(name));
+                if (control) { el.id = 'e-' + name; control.setAttribute('aria-invalid', 'true'); control.setAttribute('aria-describedby', el.id); }
+            }
             else general.push(name + ': ' + f[name]);
         });
         return general;
@@ -257,6 +291,7 @@ window.fields = (function () {
     function clearErrors(container) {
         container.querySelectorAll('.field-error').forEach(function (el) { el.textContent = ''; });
         container.querySelectorAll('.has-error').forEach(function (el) { el.classList.remove('has-error'); });
+        container.querySelectorAll('[aria-invalid]').forEach(function (el) { el.removeAttribute('aria-invalid'); el.removeAttribute('aria-describedby'); });
     }
 
     /* ── Felder nach Gruppen rendern ── */

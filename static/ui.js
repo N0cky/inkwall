@@ -31,6 +31,9 @@ window.ui = (function () {
         if (!toastHost) {
             toastHost = document.createElement('div');
             toastHost.className = 'toast-host';
+            // Screenreader lesen Meldungen vor („Gespeichert“, Fehler), ohne dass der Fokus springt
+            toastHost.setAttribute('role', 'status');
+            toastHost.setAttribute('aria-live', 'polite');
             document.body.appendChild(toastHost);
         }
         var el = document.createElement('div');
@@ -44,20 +47,46 @@ window.ui = (function () {
         }, ms || 3200);
     }
 
+    /* Zeitstempel des Servers: mit Z, mit Versatz (+02:00) oder ohne beides (dann UTC) */
+    function parseIso(iso) {
+        var s = String(iso);
+        return new Date(/(Z|[+-]\d\d:?\d\d)$/.test(s) ? s : s + 'Z');
+    }
+
     function fmtTime(iso) {
         if (!iso) return '–';
-        var normalized = String(iso).replace(/\+00:00$/, 'Z');
-        var d = new Date(normalized.endsWith('Z') || /[+-]\d\d:\d\d$/.test(normalized) ? normalized : normalized + 'Z');
+        var d = parseIso(iso);
         if (isNaN(d.getTime())) return iso;
         return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     }
 
     function fmtDateTime(iso) {
         if (!iso) return '–';
-        var normalized = String(iso).replace(/\+00:00$/, 'Z');
-        var d = new Date(normalized.endsWith('Z') ? normalized : normalized + 'Z');
+        var d = parseIso(iso);
         if (isNaN(d.getTime())) return iso;
         return d.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    /* Regelmäßig abfragen, ohne dass sich Anfragen stapeln: nie zwei gleichzeitig,
+       nicht im Hintergrund-Tab, und nach Fehlern mit wachsender Pause (bis 2 min).
+       fn liefert ein Promise; abgelehnt zählt als Fehler. Rückgabe: run() für sofort. */
+    function poll(fn, everyMs) {
+        var running = false, failures = 0, last = 0;
+        function wait() { return failures ? Math.min(120000, everyMs * Math.pow(2, failures - 1)) : everyMs; }
+        async function run() {
+            if (running) return;
+            running = true; last = Date.now();
+            try { await fn(); failures = 0; } catch (e) { failures++; }
+            running = false;
+        }
+        setInterval(function () {
+            if (document.hidden || Date.now() - last < wait()) return;
+            run();
+        }, Math.min(everyMs, 5000));
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden && Date.now() - last >= everyMs) run();
+        });
+        return run;
     }
 
     /* "vor 4 min", "vor 2 h", "gerade eben" */
@@ -76,5 +105,5 @@ window.ui = (function () {
         return m + ':' + String(s % 60).padStart(2, '0');
     }
 
-    return { esc: esc, json: json, toast: toast, fmtTime: fmtTime, fmtDateTime: fmtDateTime, ago: ago, mmss: mmss };
+    return { esc: esc, json: json, toast: toast, fmtTime: fmtTime, fmtDateTime: fmtDateTime, ago: ago, mmss: mmss, poll: poll };
 })();

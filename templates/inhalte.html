@@ -11,8 +11,10 @@
 .mod { overflow: clip; }
 .mod-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 16px 18px; cursor: pointer; }
 .mod-head:hover { background: var(--surface3); }
+.mod-toggle { display: block; min-width: 0; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 8px; }
+.mod-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .mod-name { font-weight: 800; font-size: 15px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mod-sum { color: var(--muted); font-size: 12.5px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mod-sum { display: block; color: var(--muted); font-size: 12.5px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mod-actions { display: flex; gap: 6px; align-items: center; }
 .mod-body { display: none; border-top: 1px solid var(--border); padding: 18px; }
 .mod.open .mod-body { display: block; }
@@ -51,12 +53,14 @@
         return m.enabled ? '<span class="chip ok">eingeschaltet</span>' : '<span class="chip">bereit, aus</span>';
     }
 
+    /* Der Kopf ist ein echter Knopf (Tastatur, Screenreader); „Vorschau“ steht daneben, nicht darin */
     function cardHtml(m) {
         return '<div class="card mod" id="' + esc(m.id) + '" data-id="' + esc(m.id) + '">'
-            + '<div class="mod-head" role="button" tabindex="0" aria-expanded="false">'
-            + '<div><div class="mod-name">' + esc(m.name) + ' ' + chipFor(m) + '</div>' + (m.summary ? '<div class="mod-sum">' + esc(m.summary) + '</div>' : '') + '</div>'
-            + '<div class="mod-actions">' + (m.status.state !== 'missing' ? '<button class="btn small" type="button" data-preview="' + esc(m.id) + '">Vorschau</button>' : '') + '<span class="caret">▼</span></div>'
-            + '</div><div class="mod-body"><div class="hint">Wird geladen …</div></div></div>';
+            + '<div class="mod-head">'
+            + '<button class="mod-toggle" type="button" aria-expanded="false" aria-controls="body-' + esc(m.id) + '">'
+            + '<span class="mod-name">' + esc(m.name) + ' ' + chipFor(m) + '</span>' + (m.summary ? '<span class="mod-sum">' + esc(m.summary) + '</span>' : '') + '</button>'
+            + '<div class="mod-actions">' + (m.status.state !== 'missing' ? '<button class="btn small" type="button" data-preview="' + esc(m.id) + '" aria-label="Vorschau ' + esc(m.name) + '">Vorschau</button>' : '') + '<span class="caret" aria-hidden="true">▼</span></div>'
+            + '</div><div class="mod-body" id="body-' + esc(m.id) + '"><div class="hint">Wird geladen …</div></div></div>';
     }
 
     async function load() {
@@ -74,19 +78,22 @@
 
     function bindCards() {
         document.querySelectorAll('.mod-head').forEach(function (head) {
-            head.addEventListener('click', function (e) { if (e.target.closest('button')) return; toggleCard(head.closest('.mod')); });
-            head.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCard(head.closest('.mod')); } });
+            // Der ganze Kopf bleibt klickbar (auch der Pfeil); Knöpfe darin tun ihr Eigenes
+            head.addEventListener('click', function (e) {
+                if (e.target.closest('button') && !e.target.closest('.mod-toggle')) return;
+                toggleCard(head.closest('.mod'));
+            });
         });
         document.querySelectorAll('[data-preview]').forEach(function (b) {
             b.addEventListener('click', function () { window.open('/api/preview/' + encodeURIComponent(b.getAttribute('data-preview')) + '.png?device=1', '_blank', 'noopener'); });
         });
     }
 
-    function toggleCard(card) { if (card.classList.contains('open')) { card.classList.remove('open'); card.querySelector('.mod-head').setAttribute('aria-expanded', 'false'); } else openCard(card); }
+    function toggleCard(card) { if (card.classList.contains('open')) { card.classList.remove('open'); card.querySelector('.mod-toggle').setAttribute('aria-expanded', 'false'); } else openCard(card); }
 
     async function openCard(card) {
         card.classList.add('open');
-        card.querySelector('.mod-head').setAttribute('aria-expanded', 'true');
+        card.querySelector('.mod-toggle').setAttribute('aria-expanded', 'true');
         if (card.dataset.loaded) return;
         card.dataset.loaded = '1';
         var id = card.getAttribute('data-id');
@@ -101,7 +108,7 @@
             save: function () { return save(card, id, form); },
             discard: function () { renderForm(form, id, bar); }
         });
-        body.querySelector('[data-probe]').addEventListener('click', function () { probe(id, this, body.querySelector('[data-probe-result]')); });
+        body.querySelector('[data-probe]').addEventListener('click', function () { probe(id, this, body.querySelector('[data-probe-result]'), form, bar); });
         // Ein/Aus-Felder gibt es hier nicht mehr – das macht die Anzeige-Seite
         await renderForm(form, id, bar);
     }
@@ -152,11 +159,15 @@
         });
     }
 
-    async function probe(id, btn, out) {
+    /* Prüft, was im Formular steht – auch vor dem Speichern (leere Passwortfelder nehmen den gespeicherten Wert) */
+    async function probe(id, btn, out, form, bar) {
         btn.disabled = true; btn.textContent = 'Prüft …'; out.textContent = ''; out.className = 'probe';
+        var unsaved = bar.isDirty();
         try {
-            var r = await ui.json('/api/probe/' + encodeURIComponent(id), { method: 'POST' });
-            out.textContent = r.message; out.className = 'probe ' + (r.ok ? 'ok' : 'bad');
+            var body = form.querySelector('[data-field]') ? { values: fields.collect(form) } : {};
+            var r = await ui.json('/api/probe/' + encodeURIComponent(id), { method: 'POST', body: body });
+            out.textContent = r.message + (unsaved ? ' (mit den noch nicht gespeicherten Werten)' : '');
+            out.className = 'probe ' + (r.ok ? 'ok' : 'bad');
             renderProbeDetails(out, r.details || []);
         } catch (e) { out.textContent = 'Prüfung fehlgeschlagen: ' + e.message; out.className = 'probe bad'; }
         btn.disabled = false; btn.textContent = 'Verbindung prüfen';

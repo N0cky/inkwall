@@ -323,7 +323,7 @@ When settings are changed through the web UI, the application writes them back t
 | `/api/preview/<module_id>.png` | GET | Render one module on demand without touching the display. `?theme=dark\|light\|eink` overrides the theme, `?device=1` returns the 6-colour Spectra preview, `dashboard` renders all tiles. 404 with a JSON message when the module has no content |
 | `/api/display` | GET, PUT | What the display shows, the programme (content modules with on/off, order, tile heights, status), live sources, night plan, device status. PUT accepts the same shape and writes the settings |
 | `/api/settings/<module_id>` | GET, PUT | Fields of one module card (`framework` for device and system fields) with current values; PUT validates and returns errors per field. Passwords are never returned, an empty password keeps the stored one |
-| `/api/probe/<module_id>` | POST | Fetch the module's source once and report the result in one sentence |
+| `/api/probe/<module_id>` | POST | Fetch the module's source once and report the result in one sentence; with `{"values": {…}}` it tests unsaved form values (only for this request) |
 | `/api/logs?events=1` | GET | Only events (content switched, device reported, settings saved, source unreachable) instead of every render line |
 
 ---

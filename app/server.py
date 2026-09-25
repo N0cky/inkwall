@@ -1704,7 +1704,7 @@ def api_module_settings_get(module_id: str):
 
 @app.route("/api/settings/<module_id>", methods=["PUT", "POST"])
 def api_module_settings_put(module_id: str):
-    from app.display_api import build_module_settings, map_errors_to_fields, module_updates_from_values
+    from app.display_api import build_module_settings, list_value_errors, map_errors_to_fields, module_updates_from_values
     payload = request.get_json(silent=True) or {}
     values = payload.get("values", payload)
     if not isinstance(values, dict):
@@ -1720,7 +1720,7 @@ def api_module_settings_put(module_id: str):
     all_fields = _all_fields_from_sections(sections)
     # Nur diese Karte prüfen: eine Lücke in einem anderen Modul darf das
     # Speichern hier nicht blockieren (das prüft die Anzeige beim Einschalten)
-    errors = list(validate_settings(updates, all_fields))
+    errors = list_value_errors(module_id, values) + list(validate_settings(updates, all_fields))
     target = _registry.get_module_by_id(module_id)
     if target is not None:
         try:
@@ -1737,9 +1737,12 @@ def api_module_settings_put(module_id: str):
 
 @app.route("/api/probe/<module_id>", methods=["POST"])
 def api_probe(module_id: str):
+    """Mit {"values": {…}} prüft die Karte ihre Formularwerte, bevor sie gespeichert sind."""
     from app.display_api import probe_module
+    payload = request.get_json(silent=True) or {}
+    values = payload.get("values") if isinstance(payload, dict) else None
     try:
-        return jsonify(probe_module(module_id))
+        return jsonify(probe_module(module_id, values if isinstance(values, dict) else None))
     except LookupError:
         return jsonify({"ok": False, "message": "Unbekanntes Modul"}), 404
 

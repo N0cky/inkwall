@@ -502,6 +502,39 @@ def module_updates_from_values(module_id: str, incoming: dict) -> dict[str, str]
     return updates
 
 
+def list_value_errors(module_id: str, incoming: dict) -> list[str]:
+    """
+    Listen und Zuordnungen landen als eine Zeile in settings.env ('Name|URL; URL',
+    'bio=blue, papier=blue'). Ein Trennzeichen in einem Eintrag würde ihn beim
+    nächsten Laden still in falsche Spalten zerlegen – deshalb vorher ablehnen.
+    """
+    fields, _, _ = _fields_for(module_id)
+    errors: list[str] = []
+    for field in fields:
+        value = incoming.get(field["name"])
+        ftype = field.get("type", "text")
+        if ftype not in ("list", "mapping") or not isinstance(value, list):
+            continue
+        if ftype == "list":
+            cols = field.get("item_fields") or [{"name": "value", "label": field.get("label", "")}]
+            forbidden = [field.get("separator", ";")] + ([field.get("joiner", "|")] if len(cols) > 1 else [])
+        else:
+            cols = field.get("item_fields") or [{"name": "key", "label": "Stichwort"}, {"name": "value", "label": "Wert"}]
+            forbidden = [",", "="]
+        for row, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                continue
+            for col in cols:
+                text = str(item.get(col["name"], "") or "")
+                bad = [c for c in forbidden if c in text] + (["Zeilenumbruch"] if "\n" in text else [])
+                if bad:
+                    what = " und ".join(f"„{c}“" if len(c) == 1 else c for c in bad)
+                    errors.append(f"{field.get('label', field['name'])}: Zeile {row}, {col.get('label') or col['name']}: "
+                                  f"{what} ist hier nicht möglich – das Zeichen trennt die Einträge beim Speichern.")
+                    break
+    return errors
+
+
 def map_errors_to_fields(errors: list[str], fields: list[dict]) -> dict[str, Any]:
     """'Label: Nachricht' → {"fields": {name: Nachricht}, "general": [...]}."""
     by_label = {str(f.get("label", "")).strip(): f["name"] for f in fields if f.get("label")}
@@ -569,11 +602,21 @@ def import_updates(payload: dict) -> tuple[dict[str, str], list[str]]:
     return updates, ignored
 
 
-def probe_module(module_id: str) -> dict[str, Any]:
+def probe_module(module_id: str, values: dict | None = None) -> dict[str, Any]:
+    """
+    Verbindung prüfen. values: Formularwerte der Karte, noch nicht gespeichert –
+    sie gelten nur für diese Prüfung (leere Passwörter behalten den gespeicherten Wert).
+    """
     mod = _registry.get_module_by_id(module_id)
     if mod is None:
         raise LookupError(module_id)
-    result = _safe(lambda: mod.probe(get_settings_values()), {"ok": False, "message": "Prüfung fehlgeschlagen"})
+    from app.config import override_runtime_config
+    env = get_settings_values()
+    unsaved = module_updates_from_values(module_id, values) if isinstance(values, dict) else {}
+    env = {**env, **unsaved}
+    # Die Datenquellen lesen ihre Einstellungen über get_setting – dort müssen die Formularwerte auch gelten
+    with override_runtime_config(settings_values=unsaved):
+        result = _safe(lambda: mod.probe(env), {"ok": False, "message": "Prüfung fehlgeschlagen"})
     details = result.get("details") or []
     return {
         "ok": bool(result.get("ok")),

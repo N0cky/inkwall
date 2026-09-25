@@ -291,6 +291,74 @@ class ModuleSettingsTest(unittest.TestCase):
         self.assertIn("keine Daten", result["message"])
 
 
+class _FormModule(_Content):
+    """Mit Listen-Feldern und einer Prüfung, die Werte über env und über get_setting liest."""
+    SETTINGS_FIELDS = _Content.SETTINGS_FIELDS + [
+        {"name": "DEMO_SOURCES", "label": "Quellen", "type": "list",
+         "item_fields": [{"name": "label", "label": "Name"}, {"name": "url", "label": "Adresse"}]},
+        {"name": "DEMO_PATHS", "label": "Ordner", "type": "list", "item_fields": [{"name": "path", "label": "Ordner"}]},
+        {"name": "DEMO_COLORS", "label": "Farben", "type": "mapping"},
+    ]
+
+    def probe(self, env):
+        return {"ok": True, "message": "|".join([env.get("DEMO_URL", ""), config.get_setting("DEMO_URL"),
+                                                 env.get("DEMO_SECRET", ""), config.get_setting("DEMO_SECRET")])}
+
+
+class CardFormTest(unittest.TestCase):
+    """Verbindung prüfen mit Formularwerten, Trennzeichen in Listen."""
+
+    def setUp(self) -> None:
+        self._patches = _with_registry([_FormModule("demo", "Demo")], [])
+        for p in self._patches:
+            p.start()
+        config.apply_runtime_config({**config.read_env_settings(), "DEMO_URL": "https://gespeichert", "DEMO_SECRET": "geheim"})
+        self.client = server.app.test_client()
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+        config.apply_runtime_config()
+
+    def test_probe_checks_unsaved_form_values_only_for_this_request(self) -> None:
+        result = self.client.post("/api/probe/demo", json={"values": {"DEMO_URL": "https://neu", "DEMO_SECRET": ""}}).get_json()
+        # Datenquellen lesen über get_setting – auch dort gelten die Formularwerte; leeres Passwort = gespeichertes
+        self.assertEqual(result["message"], "https://neu|https://neu|geheim|geheim")
+        self.assertEqual(config.get_settings_values()["DEMO_URL"], "https://gespeichert", "nichts gespeichert")
+        # Ohne Werte: der gespeicherte Stand
+        self.assertEqual(self.client.post("/api/probe/demo").get_json()["message"],
+                         "https://gespeichert|https://gespeichert|geheim|geheim")
+
+    def test_separator_inside_list_entry_is_rejected(self) -> None:
+        cases = [
+            ("DEMO_SOURCES", [{"label": "Arbeit|Privat", "url": "https://a"}], "„|“"),
+            ("DEMO_SOURCES", [{"label": "", "url": "https://a"}, {"label": "B", "url": "https://b;c"}], "Zeile 2"),
+            ("DEMO_COLORS", [{"key": "bio,rest", "value": "green"}], "„,“"),
+            ("DEMO_COLORS", [{"key": "a=b", "value": "green"}], "„=“"),
+        ]
+        for name, value, expected in cases:
+            with self.subTest(name=name, value=value), \
+                 patch.object(server, "write_env_settings") as write_env, patch.object(server, "request_render"):
+                response = self.client.put("/api/settings/demo", json={"values": {name: value}})
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected, response.get_json()["errors"]["fields"][name])
+                write_env.assert_not_called()
+
+    def test_valid_lists_are_joined(self) -> None:
+        with patch.object(server, "write_env_settings") as write_env, patch.object(server, "request_render"):
+            response = self.client.put("/api/settings/demo", json={"values": {
+                "DEMO_SOURCES": [{"label": "Familie", "url": "https://a"}, {"label": "", "url": "https://b"}],
+                # Einspaltige Liste: nur das Semikolon trennt, ein | im Pfad ist erlaubt
+                "DEMO_PATHS": [{"path": "/bilder|alt"}],
+                "DEMO_COLORS": [{"key": "bio", "value": "green"}],
+            }})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        written = write_env.call_args[0][0]
+        self.assertEqual(written["DEMO_SOURCES"], "Familie|https://a; https://b")
+        self.assertEqual(written["DEMO_PATHS"], "/bilder|alt")
+        self.assertEqual(written["DEMO_COLORS"], "bio=green")
+
+
 class BaseHookDefaultsTest(unittest.TestCase):
     def test_default_status_from_health(self) -> None:
         class _M(InkwallModule):

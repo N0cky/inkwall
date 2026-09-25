@@ -645,11 +645,14 @@ def override_runtime_config(**changes):
     beim Verlassen den vorherigen Stand wieder her, auch bei Exceptions.
     Ohne Änderungen friert der Block den aktuellen Stand ein: wer in der
     Zwischenzeit speichert, ändert den laufenden Render nicht mittendrin.
+    settings_values={…} legt einzelne Einstellungen darüber (Prüfen mit
+    noch nicht gespeicherten Formularwerten).
     """
     previous = get_cfg()
     current = previous
     if changes:
         settings = dict(previous.settings_values)
+        settings.update(changes.pop("settings_values", None) or {})
         if "display_theme" in changes:
             settings["DISPLAY_THEME"] = str(changes["display_theme"])
         current = _dc_replace(previous, settings_values=settings, **changes)

@@ -343,6 +343,8 @@ einen Status-Chip, auf der Inhalte-Seite eine Zusammenfassung und einen Knopf "P
   Eine Datenquelle, die dafuer `fetch_*` aufruft, prueft vor dem Abruf `network_allowed()` und
   antwortet sonst mit dem, was sie schon hat (oder `None`) – ohne einen Fehlversuch zu vermerken.
 - `probe(env)` → `{"ok": bool, "message": str, "details": [str, ...]}`, ruft die Quelle einmal ab.
+  „Verbindung prüfen“ übergibt dabei die noch nicht gespeicherten Formularwerte – in `env` und für die
+  Dauer der Prüfung auch in `get_setting()`; eine Datenquelle, die ihre Einstellungen dort liest, prüft also mit.
   Standard: `fetch_content()` und "Daten vorhanden" / "keine Daten". `details` ist optional
   und erscheint als Kasten unter dem Pruef-Ergebnis; Zeilen mit Doppelpunkt am Ende werden
   als Ueberschrift gesetzt (die Muellabfuhr listet so die naechsten Termine und die erkannten Tonnen).
