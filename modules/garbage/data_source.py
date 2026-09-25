@@ -3,8 +3,10 @@ Müllabfuhr-Datenquelle: liest einen oder mehrere ICS-Kalender (wie sie fast
 jede Kommune anbietet), filtert die nächsten Abfuhrtermine und ordnet jeder
 Tonne eine Farbe und ein Symbol zu.
 
-Kein externes ICS-Paket: Abfuhrkalender sind flache VEVENT-Listen ohne
-Wiederholungsregeln, ein kleiner Parser reicht und hält die Abhängigkeiten klein.
+Das Lesen der ICS-Dateien übernimmt app/ics.py (derselbe Parser wie beim
+Kalender): so klappen auch Kommunen, die „alle zwei Wochen“ als Regel statt
+als Einzeltermine schreiben, abgesagte Termine fallen weg, und ein Termin um
+Mitternacht in UTC landet am richtigen Tag statt am Vortag.
 
 Robustheit:
 - Der letzte erfolgreiche Stand jeder URL liegt zusätzlich auf Platte
@@ -22,9 +24,10 @@ import re
 import threading
 import time
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from app import ics
 from app.config import DATA_DIR, WEEKDAYS_DE_LONG, get_int_setting, get_setting, now_local
 from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 from app.logger import get_logger
@@ -37,6 +40,8 @@ DEFAULT_REMINDER_HOUR = 18      # ab dieser Uhrzeit am Vortag: Erinnerung + Vorr
 DEFAULT_DONE_HOUR = 12          # ab dieser Uhrzeit am Abfuhrtag gilt der Termin als erledigt
 LOOKAHEAD_NEXT_YEAR_DAYS = 45   # so früh vor Jahresende auch den Folgejahres-Kalender laden
 YEAR_PLACEHOLDER = "{year}"
+HISTORY_DAYS = 730              # so weit zurück: Vorjahr fürs Erkennen verschobener Termine
+LOOKAHEAD_DAYS = 400            # so weit voraus (Wiederholungsregeln haben oft kein Ende)
 CACHE_FILE = DATA_DIR / "garbage_cache.json"
 
 # Stichwort (kleingeschrieben, Teilstring) → Farbschlüssel. Reihenfolge zählt:
@@ -151,63 +156,23 @@ def classify_icon(summary: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ICS-Parser (RFC 5545, nur was Abfuhrkalender brauchen)
+# ICS lesen (app/ics.py)
 # ---------------------------------------------------------------------------
 
-def unfold_ics_lines(text: str) -> list[str]:
-    """Fortsetzungszeilen (beginnen mit Leerzeichen/Tab) an die Vorzeile hängen."""
-    lines: list[str] = []
-    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
-        else:
-            lines.append(raw)
-    return lines
-
-
-_DATE_RE = re.compile(r"(\d{4})(\d{2})(\d{2})")
-
-
-def _parse_ics_date(value: str) -> date | None:
-    match = _DATE_RE.match((value or "").strip())
-    if not match:
-        return None
-    try:
-        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    except ValueError:
-        return None
-
-
-def _unescape(value: str) -> str:
-    return (value or "").replace("\\n", " ").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\").strip()
-
-
-def parse_ics_events(text: str) -> list[dict]:
-    """Gibt [{'date': date, 'summary': str, 'description': str, 'uid': str}, …] zurück."""
-    events: list[dict] = []
-    current: dict | None = None
-    for line in unfold_ics_lines(text):
-        if line == "BEGIN:VEVENT":
-            current = {}
-            continue
-        if line == "END:VEVENT":
-            if current is not None and current.get("date") and current.get("summary"):
-                events.append(current)
-            current = None
-            continue
-        if current is None or ":" not in line:
-            continue
-        name_part, value = line.split(":", 1)
-        name = name_part.split(";", 1)[0].upper()
-        if name == "DTSTART":
-            current["date"] = _parse_ics_date(value)
-        elif name == "SUMMARY":
-            current["summary"] = _unescape(value)
-        elif name == "DESCRIPTION":
-            current["description"] = _unescape(value)
-        elif name == "UID":
-            current["uid"] = value.strip()
-    return events
+def parse_ics_events(text: str, around: date | None = None) -> list[dict]:
+    """
+    Abfuhrtermine eines ICS-Kalenders, nach Datum sortiert:
+    [{'date': date, 'summary': str, 'description': str, 'uid': str}, …].
+    Wiederholungen werden im Zeitraum rund um `around` (Standard: heute)
+    aufgelöst. Wirft ics.IcsError, wenn der Text kein Kalender ist.
+    """
+    around = around or now_local().date()
+    calendar = ics.parse_calendar(text)
+    found = ics.occurrences(calendar, around - timedelta(days=HISTORY_DAYS), around + timedelta(days=LOOKAHEAD_DAYS))
+    return [
+        {"date": ics.as_date(o["start"]), "summary": o["summary"], "description": o["description"], "uid": o["uid"]}
+        for o in found
+    ]
 
 
 # ---------------------------------------------------------------------------

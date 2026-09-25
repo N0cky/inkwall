@@ -37,7 +37,7 @@ import app.device as device
 import app.http_client as http_client
 import app.notifications as nf
 import app.server as server
-from app import schedule
+from app import ics, schedule
 from tests.test_render_pipeline import _FakeModule, _PipelineTestBase, _with_modules
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -376,7 +376,7 @@ class GarbageCacheTest(unittest.TestCase):
 
     def test_last_years_calendar_no_longer_forces_renders(self) -> None:
         now = time.time()
-        events = garbage_ds.parse_ics_events(GARBAGE_ICS)
+        events = garbage_ds.parse_ics_events(GARBAGE_ICS, around=date(2026, 9, 10))
         garbage_ds._CACHE[URL_2026] = {"fetched_at": now - 30 * 86400, "last_attempt_at": now - 30 * 86400, "events": events, "missing": False}
         garbage_ds._CACHE[URL_2027] = {"fetched_at": now, "last_attempt_at": now, "events": events, "missing": False}
         january = datetime(2027, 1, 5, 8, 0, tzinfo=BERLIN)
@@ -433,11 +433,11 @@ class CalendarCacheTest(unittest.TestCase):
     def test_removed_calendar_is_ignored_and_forgotten(self) -> None:
         now = time.time()
         text = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTART;VALUE=DATE:20260911\r\nSUMMARY:Alt\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
-        events = calendar_ds.parse_ics_events(text)
+        parsed = ics.parse_calendar(text)
         with calendar_ds._LOCK:
             calendar_ds._load_disk_cache()
-            calendar_ds._CACHE["https://cal.test/old.ics"] = {"fetched_at": 0.0, "last_attempt_at": 0.0, "events": events, "error": "", "text": text}
-            calendar_ds._CACHE["https://cal.test/a.ics"] = {"fetched_at": now, "last_attempt_at": now, "events": events, "error": "", "text": text}
+            calendar_ds._CACHE["https://cal.test/old.ics"] = {"fetched_at": 0.0, "last_attempt_at": 0.0, "calendar": parsed, "error": "", "text": text}
+            calendar_ds._CACHE["https://cal.test/a.ics"] = {"fetched_at": now, "last_attempt_at": now, "calendar": parsed, "error": "", "text": text}
         self.assertFalse(calendar_ds.should_refresh_calendar(), "der entfernte Kalender löst keinen Neu-Render aus")
         with patch.object(http_client.HTTP_SESSION, "get", side_effect=_no_network), \
              patch.object(calendar_ds, "now_local", return_value=datetime(2026, 9, 10, 8, 0, tzinfo=BERLIN)):

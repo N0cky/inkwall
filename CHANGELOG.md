@@ -72,6 +72,7 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Writing requests from other websites are refused (`Sec-Fetch-Site`, `Origin`) – the browser sends stored Basic Auth along, so a page in the network could otherwise upload a firmware the display installs; devices, curl and webhooks are not affected
 - "Einstellungen sichern" without secrets leaves out the notification address and the calendar, garbage and transport API links as well (fields marked `"secret": True`)
 - Webhook tokens, ntfy topics, private calendar links, credentials in URLs and all configured secret values are masked in log lines and in error messages of the web UI; `/health` shows content details only without a UI password or when signed in; uploads are limited to 4 MB; the UI password is compared in constant time; only known acknowledgement results become metric labels
+- Kalender and Müllabfuhr read ICS files through one shared parser (`app/ics.py`, based on `icalendar` and `recurring-ical-events`, two new dependencies) instead of two hand-written ones; the Müllabfuhr now also understands repeat rules ("alle zwei Wochen") and cancelled dates. Expanded appointments are remembered per calendar state, and an unchanged calendar is no longer rewritten to disk on every fetch
 
 ### Fixed
 
@@ -103,6 +104,8 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Firmware: the `/hash` fallback accepted any HTTP 200 body (a captive portal page counted as a hash); both meta and hash must be 32 hex characters now
 - Firmware: the offline image in flash was truncated before it was rewritten – a power cut while saving left the banner on a white page; it is written to a temporary file and renamed
 - `ui.esc()` did not escape `'`, while some attributes are single-quoted (a label with an apostrophe could break the settings page)
+- Kalender: a Thunderbird time zone (`TZID=/mozilla.org/…/Europe/Berlin`) made the whole calendar fail; an Exchange time zone with a colon in quotes dropped the event; monthly rules like "every 2nd Tuesday" landed on the day of the first date; a moved single date of a series showed up twice and a cancelled one still appeared; daily and weekly series stopped after 500 occurrences counted from their start (a daily series from 2024 was gone in 2026); one broken event (or one without a start) hid the whole calendar
+- Müllabfuhr: a collection date written as midnight in UTC (`DTSTART:20261014T220000Z`) landed on the day before
 
 ## [0.1.0] - 2026-04-20
 

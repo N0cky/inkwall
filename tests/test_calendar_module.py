@@ -1,7 +1,9 @@
 """
-Tests für das Kalender-Modul: ICS-Parser (Zeitzonen, ganztägig, DURATION),
-Wiederholungsregeln (DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT, UNTIL,
-BYDAY, EXDATE), Inhaltsaufbau und Rendering.
+Tests für das Kalender-Modul und den gemeinsamen ICS-Parser (app/ics.py):
+Zeitzonen (TZID, UTC, Thunderbird, Exchange, Windows-Namen), ganztägig,
+DURATION, Wiederholungsregeln (DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT,
+UNTIL, BYDAY auch „2TU“, EXDATE), verschobene und abgesagte Einzeltermine,
+kaputte Serien, Inhaltsaufbau und Rendering.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from PIL import Image
 
 import app.config as config
 import app.http_client as http_client
+from app import ics
 from app.module_services import ModuleRenderServices
 from modules.calendar_ics import data_source as ds
 from modules.calendar_ics import module as calendar
@@ -37,6 +40,10 @@ def _local(y, m, d, hh=0, mm=0):
 NOW = _local(2026, 9, 10, 9, 0)      # Donnerstag
 
 
+def _occ(text: str, window_start=date(2026, 9, 10), window_end=date(2026, 9, 30)) -> list:
+    return ics.occurrences(ics.parse_calendar(text), window_start, window_end)
+
+
 class ParserTest(unittest.TestCase):
     def test_all_day_and_timed_with_tzid_and_utc(self) -> None:
         text = _ics(
@@ -44,7 +51,7 @@ class ParserTest(unittest.TestCase):
             "UID:b\r\nDTSTART;TZID=Europe/Berlin:20260912T093000\r\nDTEND;TZID=Europe/Berlin:20260912T103000\r\nSUMMARY:Lokal",
             "UID:c\r\nDTSTART:20260912T120000Z\r\nDURATION:PT45M\r\nSUMMARY:UTC mit Dauer\r\nLOCATION:Raum 1\\, Haus 2",
         )
-        events = ds.parse_ics_events(text)
+        events = _occ(text, date(2026, 9, 12), date(2026, 9, 12))
         self.assertEqual(len(events), 3)
         a, b, c = events
         self.assertTrue(a["all_day"])
@@ -63,16 +70,39 @@ class ParserTest(unittest.TestCase):
             "UID:y\r\nDTSTART;VALUE=DATE:20260912",
             "UID:z\r\nDTSTART;VALUE=DATE:20260912\r\nSUMMARY:Bleibt",
         )
-        self.assertEqual([e["summary"] for e in ds.parse_ics_events(text)], ["Bleibt"])
+        self.assertEqual([e["summary"] for e in _occ(text)], ["Bleibt"])
 
     def test_sources_accept_webcal(self) -> None:
         self.assertEqual(ds.parse_sources("Privat|webcal://x.test/a.ics"), [("Privat", "https://x.test/a.ics")])
 
+    def test_foreign_time_zone_names(self) -> None:
+        text = _ics(
+            # Thunderbird: TZID mit Präfix – brachte früher den ganzen Kalender zu Fall
+            "UID:t\r\nDTSTART;TZID=/mozilla.org/20050126_1/Europe/Berlin:20260910T100000\r\nSUMMARY:Thunderbird",
+            # Exchange: Doppelpunkt im TZID in Anführungszeichen – der Termin fiel früher still weg
+            'UID:e\r\nDTSTART;TZID="(UTC+01:00) Amsterdam, Berlin, Bern, Rom, Stockholm, Wien":20260910T110000\r\nSUMMARY:Exchange',
+            # Outlook: Windows-Name
+            "UID:w\r\nDTSTART;TZID=W. Europe Standard Time:20260910T120000\r\nSUMMARY:Outlook",
+        )
+        found = {e["summary"]: e["start"] for e in _occ(text)}
+        self.assertEqual(set(found), {"Thunderbird", "Exchange", "Outlook"})
+        self.assertEqual([found[k].hour for k in ("Thunderbird", "Exchange", "Outlook")], [10, 11, 12])
+
+    def test_broken_series_does_not_hide_the_calendar(self) -> None:
+        text = _ics(
+            "UID:k\r\nDTSTART;VALUE=DATE:20260911\r\nSUMMARY:Kaputte Regel\r\nRRULE:FREQ=MANCHMAL",
+            "UID:g\r\nDTSTART;VALUE=DATE:20260911\r\nSUMMARY:Gut",
+        )
+        self.assertEqual([e["summary"] for e in _occ(text)], ["Gut"])
+
+    def test_not_a_calendar(self) -> None:
+        with self.assertRaises(ics.IcsError):
+            ics.parse_calendar("<html><body>404 Not Found</body></html>")
+
 
 class RecurrenceTest(unittest.TestCase):
     def _occ(self, event_text: str, window_start=date(2026, 9, 10), window_end=date(2026, 9, 30)) -> list:
-        (event,) = ds.parse_ics_events(_ics(event_text))
-        return ds.expand_occurrences(event, window_start, window_end)
+        return _occ(_ics(event_text), window_start, window_end)
 
     def test_daily_with_count(self) -> None:
         occ = self._occ("UID:d\r\nDTSTART;VALUE=DATE:20260909\r\nSUMMARY:Täglich\r\nRRULE:FREQ=DAILY;COUNT=4")
@@ -105,6 +135,34 @@ class RecurrenceTest(unittest.TestCase):
                         window_start=date(2026, 9, 1), window_end=date(2026, 10, 31))
         self.assertEqual([o["start"] for o in occ], [date(2026, 10, 31)])
 
+    def test_monthly_by_weekday_position(self) -> None:
+        # „jeden 2. Dienstag“ – landete früher auf dem Tag von DTSTART (1. Oktober statt 13.)
+        occ = self._occ("UID:2tu\r\nDTSTART;TZID=Europe/Berlin:20260113T190000\r\nSUMMARY:Stammtisch\r\nRRULE:FREQ=MONTHLY;BYDAY=2TU",
+                        window_start=date(2026, 9, 1), window_end=date(2026, 10, 31))
+        self.assertEqual([o["start"].date() for o in occ], [date(2026, 9, 8), date(2026, 10, 13)])
+
+    def test_old_daily_series_continues(self) -> None:
+        # Früher nach 500 Vorkommen ab DTSTART zu Ende – eine Serie von 2024 war 2026 weg
+        occ = self._occ("UID:old\r\nDTSTART;VALUE=DATE:20240101\r\nSUMMARY:Tabletten\r\nRRULE:FREQ=DAILY",
+                        window_start=date(2026, 9, 10), window_end=date(2026, 9, 11))
+        self.assertEqual([o["start"] for o in occ], [date(2026, 9, 10), date(2026, 9, 11)])
+
+    def test_moved_and_cancelled_instances(self) -> None:
+        text = _ics(
+            "UID:t\r\nDTSTART;TZID=Europe/Berlin:20260901T180000\r\nDTEND;TZID=Europe/Berlin:20260901T190000\r\n"
+            "SUMMARY:Training\r\nRRULE:FREQ=WEEKLY;COUNT=10",
+            "UID:t\r\nRECURRENCE-ID;TZID=Europe/Berlin:20260908T180000\r\nDTSTART;TZID=Europe/Berlin:20260909T200000\r\n"
+            "DTEND;TZID=Europe/Berlin:20260909T210000\r\nSUMMARY:Training (verschoben)",
+            "UID:t\r\nRECURRENCE-ID;TZID=Europe/Berlin:20260915T180000\r\nDTSTART;TZID=Europe/Berlin:20260915T180000\r\n"
+            "SUMMARY:Training\r\nSTATUS:CANCELLED",
+        )
+        found = [(o["start"].date(), o["start"].hour, o["summary"]) for o in _occ(text, date(2026, 9, 1), date(2026, 9, 23))]
+        self.assertEqual(found, [
+            (date(2026, 9, 1), 18, "Training"),
+            (date(2026, 9, 9), 20, "Training (verschoben)"),     # nicht zusätzlich am 8.
+            (date(2026, 9, 22), 18, "Training"),                  # 15. abgesagt
+        ])
+
     def test_multi_day_all_day_event_touches_window(self) -> None:
         occ = self._occ("UID:u\r\nDTSTART;VALUE=DATE:20260908\r\nDTEND;VALUE=DATE:20260912\r\nSUMMARY:Urlaub")
         self.assertEqual(len(occ), 1)
@@ -112,7 +170,7 @@ class RecurrenceTest(unittest.TestCase):
 
 class ContentBuildTest(unittest.TestCase):
     def _events(self):
-        return ds.parse_ics_events(_ics(
+        return ics.parse_calendar(_ics(
             "UID:1\r\nDTSTART;TZID=Europe/Berlin:20260910T080000\r\nDTEND;TZID=Europe/Berlin:20260910T083000\r\nSUMMARY:Vorbei",
             "UID:2\r\nDTSTART;TZID=Europe/Berlin:20260910T140000\r\nDTEND;TZID=Europe/Berlin:20260910T150000\r\nSUMMARY:Heute später",
             "UID:3\r\nDTSTART;VALUE=DATE:20260910\r\nSUMMARY:Ganztag heute",
@@ -138,7 +196,7 @@ class ContentBuildTest(unittest.TestCase):
         self.assertIn("Vorbei", [e["summary"] for e in content["days"][0]["events"]])
 
     def test_max_events_caps_and_reports_hidden(self) -> None:
-        many = ds.parse_ics_events(_ics(*[
+        many = ics.parse_calendar(_ics(*[
             f"UID:{i}\r\nDTSTART;VALUE=DATE:20260911\r\nSUMMARY:Termin {i}" for i in range(6)
         ]))
         content = ds.build_calendar_content([("P", "blue", many)], NOW, 7, 3)
@@ -248,7 +306,10 @@ class ResilienceAndProbeTest(LifecycleTest):
         status = calendar.describe_status(self.env)
         self.assertEqual(status["state"], "error")
         self.assertIn("DNS kaputt", status["reason"])
-        probe = calendar.probe(self.env)
+        # Prüfen lädt neu – ebenfalls ohne echtes Netz (sonst DNS-Anfrage an cal.test)
+        with patch.object(http_client.HTTP_SESSION, "get", side_effect=offline), \
+             patch.object(ds, "now_local", return_value=NOW):
+            probe = calendar.probe(self.env)
         self.assertFalse(probe["ok"])
         self.assertTrue(any("Familie: Fehler" in d for d in probe["details"]))
 
@@ -273,7 +334,7 @@ class ResilienceAndProbeTest(LifecycleTest):
 
 class RenderTest(unittest.TestCase):
     def _content(self) -> dict:
-        events = ds.parse_ics_events(_ics(
+        events = _occ(_ics(
             "UID:1\r\nDTSTART;TZID=Europe/Berlin:20260910T140000\r\nDTEND;TZID=Europe/Berlin:20260910T150000\r\nSUMMARY:Zahnarzt\r\nLOCATION:Praxis Dr. Müller",
             "UID:2\r\nDTSTART;VALUE=DATE:20260910\r\nSUMMARY:Geburtstag Oma",
             "UID:3\r\nDTSTART;TZID=Europe/Berlin:20260911T093000\r\nDTEND;TZID=Europe/Berlin:20260911T113000\r\nSUMMARY:Teammeeting mit einem sehr langen Titel der gekürzt werden muss",

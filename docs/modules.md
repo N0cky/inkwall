@@ -194,6 +194,9 @@ Gemeinsame Zeichen-Helfer fuer alle Module:
 
 - `app/text_rendering.py`: `new_draw`, `page_scale`, `tile_scale`, `wrap_text` (kuerzt auch einzelne
   ueberlange Woerter mit „…“), `ellipsize`, `fit_wrapped_text`, `fit_optional_text_block`, `draw_lines`
+- `app/ics.py`: `parse_calendar(text)` und `occurrences(kalender, von, bis)` – ICS-Kalender samt
+  Wiederholungen, verschobener/abgesagter Einzeltermine und Zeitzonen (icalendar + recurring-ical-events),
+  Termine als dicts in lokaler Zeit; Kalender und Muellabfuhr nutzen ihn
 - `app/image_rendering.py`: `resize_to_fit`, `fit_crop`, `create_blurred_cover_background`,
   `create_centered_cover_canvas`, `create_light_cover_canvas`, `create_rounded_thumbnail`,
   `draw_bottom_gradient`, `convert_to_spectra6`

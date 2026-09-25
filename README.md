@@ -32,7 +32,7 @@ Supported output modes:
 - **DWD weather** – current conditions, hourly timeline, multi-day forecast, UV index, and pollen data from the German Weather Service
 - **Tagesschau news** – current news cards with thumbnail and teaser text
 - **Müllabfuhr** – next garbage collection days from your municipality's ICS calendar, bin colours and icons included, with a `{year}` placeholder so the URL never needs a yearly update; reminder banner in the evening before collection (the module then jumps ahead in the rotation), week strip or list for the coming days, one column per address if you like, and the last good calendar is kept when the municipality's server is down
-- **Kalender** – today and the next days from one or more ICS calendars (Google, Nextcloud, iCloud, Outlook), with recurring events, a colour per calendar and multi-day events; the last good calendar is kept on disk and shown with "Stand vom …" when a source is down, and "Verbindung prüfen" lists the next appointments per calendar
+- **Kalender** – today and the next days from one or more ICS calendars (Google, Nextcloud, iCloud, Outlook, Thunderbird), with recurring events of every kind ("every 2nd Tuesday", moved and cancelled single dates, any time zone notation), a colour per calendar and multi-day events; the last good calendar is kept on disk and shown with "Stand vom …" when a source is down, and "Verbindung prüfen" lists the next appointments per calendar
 - **Abfahrten** – next departures of trains and public transport at up to three stops (delay, line, destination, platform, minutes to go), stops by name or IBNR, via a transport.rest instance of your choice
 - **Tankpreise** – cheapest fuel stations around your coordinates or a fixed list of your regulars (Tankerkönig / MTS-K, CC BY 4.0), prices per fuel with the big-9 look, cheapest green and priciest red; the module collects its own history every five minutes and shows today's curve, the last 7 and 30 days, an hour-of-day profile, average per weekday, the lows, the best time to fill up and today's saving; a price alert makes the content urgent
 - **Schedule** – time windows per weekday with their own contents, layout and refresh interval: weather and garbage in the morning, the dashboard during the day, the calendar in the evening, everything slower at night. Outside the windows the normal programme applies
@@ -362,11 +362,11 @@ Inkwall/
 │   │   └── renderer.py         # Image rendering
 │   ├── calendar_ics/
 │   │   ├── __init__.py         # Kalender module (priority 106)
-│   │   ├── data_source.py      # ICS parser with RRULE/EXDATE, timezones, multi-source cache
+│   │   ├── data_source.py      # ICS sources, multi-source cache (parsing: app/ics.py)
 │   │   └── renderer.py         # Today + upcoming days, colour bar per calendar
 │   ├── garbage/
 │   │   ├── __init__.py         # Müllabfuhr module (priority 105)
-│   │   ├── data_source.py      # ICS parser, {year} handling, bin colour mapping
+│   │   ├── data_source.py      # ICS sources, {year} handling, bin colour mapping (parsing: app/ics.py)
 │   │   └── renderer.py         # Next pickup hero + upcoming list
 │   ├── gallery/
 │   │   ├── __init__.py         # Module entry point

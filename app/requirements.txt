@@ -4,3 +4,5 @@ requests==2.32.3
 Pillow==10.4.0
 python-dotenv==1.0.1
 tzdata
+icalendar==7.3.0
+recurring-ical-events==3.8.2

@@ -37,7 +37,7 @@ def _fixed_now(*_a, **_k):
 
 class IcsParserTest(unittest.TestCase):
     def test_parses_all_events_with_dates_and_summaries(self) -> None:
-        events = ds.parse_ics_events(ICS_TEXT)
+        events = ds.parse_ics_events(ICS_TEXT, around=FIXED_TODAY)
         self.assertEqual(len(events), 31)
         self.assertTrue(all(isinstance(e["date"], date) for e in events))
         self.assertEqual({e["summary"] for e in events},
@@ -55,9 +55,32 @@ class IcsParserTest(unittest.TestCase):
             "END:VEVENT\r\nBEGIN:VEVENT\r\n"
             "SUMMARY:ohne Datum\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
         )
-        events = ds.parse_ics_events(text)
+        events = ds.parse_ics_events(text, around=FIXED_TODAY)
         self.assertEqual([(e["date"], e["summary"]) for e in events],
                          [(date(2026, 1, 5), "Gelbe Tonne lang"), (date(2026, 1, 6), "Papier, Pappe")])
+
+    def test_utc_midnight_lands_on_the_right_day(self) -> None:
+        # 22:00 UTC = 00:00 Uhr in Berlin – früher las der Parser nur die Ziffern und landete am Vortag
+        text = ("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTART:20261014T220000Z\r\n"
+                "DTEND:20261015T220000Z\r\nSUMMARY:Biotonne\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+        self.assertEqual([e["date"] for e in ds.parse_ics_events(text, around=FIXED_TODAY)], [date(2026, 10, 15)])
+
+    def test_repeating_collection_and_cancelled_date(self) -> None:
+        # Manche Kommunen schreiben „alle zwei Wochen“ als Regel statt als Einzeltermine
+        text = ("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:gelb\r\nDTSTART;VALUE=DATE:20260902\r\n"
+                "SUMMARY:Gelbe Tonne\r\nRRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=4\r\nEND:VEVENT\r\n"
+                "BEGIN:VEVENT\r\nUID:bio\r\nDTSTART;VALUE=DATE:20260911\r\nSUMMARY:Biotonne\r\n"
+                "STATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+        events = ds.parse_ics_events(text, around=FIXED_TODAY)
+        self.assertEqual([(e["date"], e["summary"]) for e in events], [
+            (date(2026, 9, 2), "Gelbe Tonne"), (date(2026, 9, 16), "Gelbe Tonne"),
+            (date(2026, 9, 30), "Gelbe Tonne"), (date(2026, 10, 14), "Gelbe Tonne"),
+        ])
+
+    def test_html_error_page_is_not_a_calendar(self) -> None:
+        from app import ics
+        with self.assertRaises(ics.IcsError):
+            ds.parse_ics_events("<!DOCTYPE html><html><body>Wartungsarbeiten</body></html>")
 
 
 class SettingsParsingTest(unittest.TestCase):
@@ -83,7 +106,7 @@ class SettingsParsingTest(unittest.TestCase):
 
 class ContentBuildTest(unittest.TestCase):
     def test_groups_upcoming_days_relative_to_today(self) -> None:
-        events = [{**e, "label": ""} for e in ds.parse_ics_events(ICS_TEXT)]
+        events = [{**e, "label": ""} for e in ds.parse_ics_events(ICS_TEXT, around=FIXED_TODAY)]
         content = ds.build_garbage_content(events, FIXED_TODAY, 14)
         self.assertIsNotNone(content)
         self.assertEqual(content["today"], "2026-09-10")
@@ -183,7 +206,7 @@ class FetchAndLifecycleTest(unittest.TestCase):
 
 class RenderTest(unittest.TestCase):
     def _content(self) -> dict:
-        events = [{**e, "label": "Zuhause"} for e in ds.parse_ics_events(ICS_TEXT)]
+        events = [{**e, "label": "Zuhause"} for e in ds.parse_ics_events(ICS_TEXT, around=FIXED_TODAY)]
         return ds.build_garbage_content(events, FIXED_TODAY, 14)
 
     def test_renders_in_all_themes_and_sizes(self) -> None:
