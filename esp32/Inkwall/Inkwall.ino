@@ -58,9 +58,9 @@
 // Der Server liest die Version aus dem Marker in der .bin (Gerät-Seite → Firmware).
 // Der Marker wird im Boot-Log referenziert, sonst wirft der Linker ihn weg.
 #ifdef OTA_SELFTEST_FAIL
-#define FIRMWARE_VERSION "1.3.0-selftest"
+#define FIRMWARE_VERSION "1.3.1-selftest"
 #else
-#define FIRMWARE_VERSION "1.3.0"
+#define FIRMWARE_VERSION "1.3.1"
 #endif
 #define FW_MARKER_PREFIX "INKWALL_FW_VERSION="
 const char FW_VERSION_MARKER[] __attribute__((used)) = FW_MARKER_PREFIX FIRMWARE_VERSION;
@@ -666,6 +666,10 @@ static uint32_t sleepAfterMeta(uint32_t seconds) {
 
 // Ende eines Zyklus mit Serverkontakt: melden, ggf. Firmware bestätigen, schlafen
 static void finishCycle(const char* result, uint32_t sleepSec) {
+    // Die Zeile muss vor der Rückmeldung stehen, sonst erreicht sie den Server nie
+    if (otaMemory.pendingVerify && !g_panelFailed) {
+        logf("[OTA] Zyklus vollstaendig - %s wird mit dieser Rueckmeldung bestaetigt", FIRMWARE_VERSION);
+    }
     bool reported = !ACK_ENABLED || sendAck(result, storedHash);
     if (!reported) logf("[WARN] ACK nicht bestaetigt");
     if (reported && !g_panelFailed) confirmFirmware();
@@ -941,6 +945,12 @@ bool connectWiFi() {
 // ════════════════════════════════════════════════════════════════════════════
 //  HTTP
 // ════════════════════════════════════════════════════════════════════════════
+// Geräte-Token (DEVICE_TOKEN in config.private.h, INKWALL_DEVICE_TOKEN am Server):
+// ohne ihn liefert der Server die Firmware nicht aus und nimmt keine Rückmeldung an.
+static void addDeviceToken(HTTPClient* http) {
+    if (strlen(DEVICE_TOKEN)) http->addHeader("X-Inkwall-Token", DEVICE_TOKEN);
+}
+
 bool httpBegin(HTTPClient& http, const String& url, uint32_t timeoutMs) {
     http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
     http.setTimeout(timeoutMs);
@@ -948,6 +958,7 @@ bool httpBegin(HTTPClient& http, const String& url, uint32_t timeoutMs) {
         logf("[HTTP] begin fehlgeschlagen fuer %s", url.c_str());
         return false;
     }
+    addDeviceToken(&http);
     return true;
 }
 
@@ -1237,7 +1248,7 @@ bool performOta(const Meta& meta, const String& tryId) {
     httpUpdate.setLedPin(-1);
     uint32_t t = millis();
     feedWatchdog();
-    t_httpUpdate_return ret = httpUpdate.update(client, url, FIRMWARE_VERSION);
+    t_httpUpdate_return ret = httpUpdate.update(client, url, FIRMWARE_VERSION, addDeviceToken);
     feedWatchdog();
 
     if (ret == HTTP_UPDATE_OK) {

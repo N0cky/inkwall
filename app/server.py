@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import hashlib
+import hmac
 import io
 import json as _json
 import logging
@@ -65,6 +66,7 @@ app = Flask(__name__,
 # Module beim Import laden (deckt sowohl 'python app/server.py' als auch
 # 'flask run' und WSGI-Server ab – reload_modules() ist idempotent)
 _registry.reload_modules()
+# (Geheimnisse fürs Log werden am Ende dieser Datei eingetragen, sobald alles definiert ist)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,15 @@ _registry.reload_modules()
 _PUBLIC_PATHS = ("/hash", "/meta.json", "/current.png", "/current.bmp", "/current.epd", "/ack", "/health",
                  "/firmware.json", "/firmware.bin")
 _PUBLIC_PREFIXES = ("/static/",)
+# Mit INKWALL_DEVICE_TOKEN brauchen diese Geräte-Endpunkte den Token (oder das
+# UI-Passwort): die Firmware enthält das WLAN-Passwort im Klartext, und über
+# /ack ließe sich sonst ein Gerät vortäuschen (Ausfall verdecken, Nachrichten auslösen).
+# Bilder und meta.json bleiben offen – die braucht auch die Oberfläche und der Bildlink in Nachrichten.
+_DEVICE_TOKEN_PATHS = ("/ack", "/firmware.bin", "/firmware.json")
+DEVICE_TOKEN_HEADER = "X-Inkwall-Token"
+# Firmware bis 3 MB plus Multipart-Rahmen; alles darüber lehnt Flask mit 413 ab,
+# bevor es im Speicher landet (auch am offenen /ack)
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
 
 def _ui_password() -> str:
@@ -83,22 +94,84 @@ def _ui_password() -> str:
     return process_env("UI_PASSWORD")
 
 
+def _device_token() -> str:
+    from app.config import process_env
+    return process_env("DEVICE_TOKEN")
+
+
+def _same_secret(given: str | None, expected: str) -> bool:
+    """Vergleich in konstanter Zeit – die Antwortzeit verrät nicht, wie viele Zeichen stimmen."""
+    return bool(given) and hmac.compare_digest(str(given).encode("utf-8"), expected.encode("utf-8"))
+
+
+def _ui_authorized(password: str) -> bool:
+    auth = request.authorization
+    return auth is not None and auth.type == "basic" and _same_secret(auth.password, password)
+
+
+def _cross_site_request() -> bool:
+    """
+    Schreibende Anfrage von einer fremden Seite? Der Browser schickt gespeicherte
+    Basic-Auth-Daten auch dann mit – eine Webseite im LAN könnte sonst etwa eine
+    Firmware hochladen, die das Gerät beim nächsten Aufwachen einspielt.
+    Sec-Fetch-Site setzt der Browser selbst (nur same-origin und direkt aufgerufen
+    zählen); ältere Browser prüfen wir über Origin. Ohne beides (Gerät, curl,
+    Plex-Webhook) ist es keine Browser-Anfrage von einer fremden Seite.
+    """
+    site = request.headers.get("Sec-Fetch-Site", "").strip().lower()
+    if site:
+        return site not in ("same-origin", "none")
+    origin = request.headers.get("Origin", "").strip()
+    if not origin or origin == "null":
+        return bool(origin)
+    from urllib.parse import urlsplit
+    origin_host = urlsplit(origin).netloc.lower()
+    hosts = {request.host.lower(), request.headers.get("X-Forwarded-Host", "").split(",")[0].strip().lower()}
+    return origin_host not in hosts
+
+
 @app.before_request
 def _require_ui_password():
+    path = request.path
+    if request.method not in ("GET", "HEAD", "OPTIONS") and _cross_site_request():
+        log.warning(f"Anfrage von fremder Seite abgelehnt: {request.method} {path}")
+        return "Anfrage von einer fremden Seite abgelehnt.", 403
+
     password = _ui_password()
+    token = _device_token()
+    if token and path in _DEVICE_TOKEN_PATHS:
+        given = request.headers.get(DEVICE_TOKEN_HEADER) or request.args.get("token")
+        if _same_secret(given, token) or (password and _ui_authorized(password)):
+            return None
+        return "Geräte-Token fehlt oder ist falsch.", 401
+
     if not password:
         return None
-    path = request.path
     if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
         return None
-    auth = request.authorization
-    if auth is not None and auth.type == "basic" and auth.password == password:
+    if _ui_authorized(password):
         return None
     return (
         "Authentifizierung erforderlich.",
         401,
         {"WWW-Authenticate": 'Basic realm="Inkwall", charset="UTF-8"'},
     )
+
+
+def _refresh_log_secrets() -> None:
+    """Konfigurierte Geheimnisse (Passwort-Felder, Webhook-Adresse, UI-Passwort, Geräte-Token) aus jeder Log-Zeile halten."""
+    from app.display_api import secret_field_names
+    from app.logger import set_known_secrets
+    try:
+        values = get_settings_values()
+        # Kalender- und Müll-Listen nicht als Ganzes: deren geheime Teile (private-…,
+        # public-calendars/…) maskiert schon das Muster, und im Log soll erkennbar
+        # bleiben, welcher Kalender gerade nicht lädt
+        lists = {"CALENDAR_ICS_URLS", "GARBAGE_ICS_URLS"}
+        secrets = [values.get(name, "") for name in secret_field_names() - lists]
+        set_known_secrets(secrets + [_ui_password(), _device_token()])
+    except Exception as exc:
+        log.warning(f"Geheimnisse für das Log nicht übernommen: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +1059,7 @@ def _build_module_health() -> dict[str, dict]:
             payload = mod.get_health_status(env)
         except Exception as exc:
             log.warning(f"module_health [{mod.MODULE_ID}]: {exc}")
-            payload = {"ok": False, "error": str(exc)}
+            payload = {"ok": False, "error": redact_secrets(str(exc))}
         if payload is not None:
             health[mod.MODULE_ID] = payload
     return health
@@ -1019,13 +1092,18 @@ def health():
     """503, sobald der Render-Worker tot ist oder hängt – dann schlägt auch der Docker-Healthcheck an."""
     from app.config import APP_VERSION
     worker = _worker_health()
-    return jsonify({
+    payload = {
         "ok": worker["ok"],
         "version": APP_VERSION,
         "ui_password": bool(_ui_password()),
         "worker": worker,
-        "modules": _build_module_health(),
-    }), (200 if worker["ok"] else 503)
+    }
+    # /health ist ohne Passwort erreichbar (Docker-Healthcheck): die Details der
+    # Inhalte (Steam-Profil, Ordner, Adressen) nur ohne UI-Passwort oder angemeldet
+    password = _ui_password()
+    if not password or _ui_authorized(password):
+        payload["modules"] = _build_module_health()
+    return jsonify(payload), (200 if worker["ok"] else 503)
 
 
 @app.route("/logo.png", methods=["GET"])
@@ -1157,7 +1235,7 @@ def api_preview(module_id: str):
         return jsonify({"ok": False, "error": "Unbekanntes Modul"}), 404
     except Exception as exc:
         log.error(f"preview [{module_id}]: {exc}", exc_info=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 500
 
     if image is None:
         return jsonify({"ok": False, "error": "Modul liefert gerade keinen Inhalt"}), 404
@@ -1229,6 +1307,9 @@ def meta_json():
     return jsonify(payload)
 
 
+_ACK_RESULTS = frozenset({"updated", "unchanged", "error", "ota", "test"})
+
+
 @app.route("/ack", methods=["POST"])
 def ack():
     """
@@ -1251,7 +1332,8 @@ def ack():
 
     # Beobachtung: Historie, Zähler, Ereignisse (Entwarnung, Firmware, Fehlerserie), letzte Rückmeldung überlebt einen Neustart
     monitoring.record_ack(ack_data, matches)
-    monitoring.increment("inkwall_acks_total", result=result)
+    # Nur bekannte Ergebnisse als Label: freie Werte ließen die Zähler (und /metrics) beliebig wachsen
+    monitoring.increment("inkwall_acks_total", result=result if result in _ACK_RESULTS else "other")
     try:
         update_device_state(lambda state: state.__setitem__("last_ack", dict(ack_data)))
     except Exception as exc:
@@ -1408,7 +1490,7 @@ def api_device_firmware_post():
     try:
         info = store_firmware(data, force=force)
     except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 400
     log_event("device", f"Firmware {info['version']} bereitgestellt{' (erzwungen)' if force else ''} – das Gerät holt sie beim nächsten Aufwachen")
     return jsonify({"ok": True, "firmware": {**info, "url": "/firmware.bin"}})
 
@@ -1519,7 +1601,7 @@ def api_rescan_modules():
         })
     except Exception as exc:
         log.error(f"api_rescan_modules: {exc}", exc_info=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 500
 
 
 @app.route("/api/modules", methods=["GET"])
@@ -1549,7 +1631,7 @@ def webhook():
         return jsonify({"ok": True, "queued": True})
     except Exception as exc:
         log.error(f"webhook: {exc}", exc_info=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 500
 
 
 # ── JSON-Schnittstelle der Oberfläche (Anzeige, Karten, Prüfen) ─────────────
@@ -1568,6 +1650,7 @@ def _apply_updates_and_render(updates: dict[str, str], wait_seconds: float = 0.0
     with settings_lock:
         write_env_settings(updates)
         apply_runtime_config({**get_settings_values(), **updates})
+    _refresh_log_secrets()
     log_event("settings", "Einstellungen gespeichert")
     request_render(wait_seconds=wait_seconds, reason="Einstellungen gespeichert")
 
@@ -1761,7 +1844,7 @@ def api_module_action(module_id: str, action: str):
         return jsonify(payload), status
     except Exception as exc:
         log.error(f"api_module_action [{module_id}.{action}]: {exc}", exc_info=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -1880,6 +1963,9 @@ def ensure_runtime_started() -> None:
 
         _runtime_started = True
         log.info("Runtime initialisiert")
+
+
+_refresh_log_secrets()
 
 
 if __name__ == "__main__":

@@ -89,6 +89,7 @@ SETTINGS_FIELDS: list[dict] = [
     },
     {
         "name":        "DEPARTURES_API_URL",
+        "secret":      True,          # steckt ein Zugangsweg drin: nicht im Export „ohne Geheimnisse“
         "label":       "Fahrplan-Schnittstelle",
         "type":        "text",
         "wide":        True,

@@ -44,13 +44,42 @@ _SECRET_PARAM_RE = _re.compile(
     r"([?&](?:X-Plex-Token|key|api_key|apikey|token|access_token|password|secret)=)[^&\s'\"]+",
     _re.IGNORECASE,
 )
+# Geheimnisse im Pfad einer URL: Webhook-Tokens, private Kalender-Links,
+# Zugangsdaten vor dem @. requests nennt die URL in jeder Fehlermeldung.
+_SECRET_PATH_RES = (
+    (_re.compile(r"(discord(?:app)?\.com/api/webhooks/\d+/)[\w-]+", _re.IGNORECASE), r"\1***"),
+    (_re.compile(r"(hooks\.slack\.com/services/[^/\s]+/[^/\s]+/)[\w-]+", _re.IGNORECASE), r"\1***"),
+    (_re.compile(r"(ntfy\.sh/)[\w-]+", _re.IGNORECASE), r"\1***"),
+    (_re.compile(r"(/private-)[0-9a-f]{8,}", _re.IGNORECASE), r"\1***"),                  # Google Kalender
+    (_re.compile(r"(/public-calendars/)[\w-]+", _re.IGNORECASE), r"\1***"),              # Nextcloud
+    (_re.compile(r"(icloud\.com/published/\d+/)[\w-]+", _re.IGNORECASE), r"\1***"),      # iCloud
+    (_re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", _re.IGNORECASE), r"\1***@"),
+)
+# Werte, die als Geheimnis konfiguriert sind (Passwort-Felder, Webhook-Adresse,
+# UI-Passwort, Geräte-Token). Der Server trägt sie nach jedem Speichern ein.
+_KNOWN_SECRETS: tuple[str, ...] = ()
+_MIN_SECRET_LEN = 6
+
+
+def set_known_secrets(values) -> None:
+    """Diese Werte tauchen in keiner Log-Zeile und keiner Fehlermeldung mehr auf."""
+    global _KNOWN_SECRETS
+    cleaned = {str(v).strip() for v in values if v and len(str(v).strip()) >= _MIN_SECRET_LEN}
+    # Längste zuerst: eine URL vor einem Token, der in ihr steckt
+    _KNOWN_SECRETS = tuple(sorted(cleaned, key=len, reverse=True))
 
 
 def redact_secrets(text: str) -> str:
-    """Maskiert Secret-Werte in URLs. Wird auf jede Log-Zeile angewendet."""
+    """Maskiert Geheimnisse in URLs und bekannte Geheimnis-Werte. Wird auf jede Log-Zeile angewendet."""
     if not text:
         return text
-    return _SECRET_PARAM_RE.sub(r"\1***", text)
+    for secret in _KNOWN_SECRETS:
+        if secret in text:
+            text = text.replace(secret, "***")
+    text = _SECRET_PARAM_RE.sub(r"\1***", text)
+    for pattern, repl in _SECRET_PATH_RES:
+        text = pattern.sub(repl, text)
+    return text
 
 
 class _JsonLineFormatter(logging.Formatter):

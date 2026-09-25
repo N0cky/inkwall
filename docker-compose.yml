@@ -9,6 +9,9 @@ services:
       INKWALL_CONFIG_FILE: /config/settings.env
       INKWALL_OUTPUT_DIR:  /output
       INKWALL_LOGS_DIR:    /logs
+      # Optional: Passwort für die Weboberfläche, Token für Firmware und Rückmeldung des Geräts
+      # INKWALL_UI_PASSWORD: "…"
+      # INKWALL_DEVICE_TOKEN: "…"   # erst setzen, wenn die Firmware mit DEVICE_TOKEN läuft
     volumes:
       - ./config:/config
       - ./data/output:/output

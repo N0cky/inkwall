@@ -31,6 +31,14 @@
 #define DEVICE_ID        "esp32-eink-01"
 #endif
 
+// Optionaler Geräte-Token: derselbe Wert wie INKWALL_DEVICE_TOKEN im Container.
+// Ist er am Server gesetzt, gibt es /firmware.bin (enthält das WLAN-Passwort)
+// und /ack nur noch mit Token. Reihenfolge: erst die Firmware mit Token
+// einspielen, dann den Token am Server setzen. Leer = aus.
+#ifndef DEVICE_TOKEN
+#define DEVICE_TOKEN     ""
+#endif
+
 
 // ── Display SPI-Pins ──────────────────────────────────────────────────────────
 // Originalbeispiel verwendet: SCK=13, MOSI=14, CS_M=15, CS_S=2, RST=26, DC=27, BUSY=25, PWR=33

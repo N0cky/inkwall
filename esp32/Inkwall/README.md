@@ -5,7 +5,7 @@ Das Geraet verbindet sich per WLAN mit dem Inkwall-Server, prueft per Hash auf
 neue Inhalte, laedt bei Bedarf das Bild, zeigt es an, meldet sich zurueck und geht
 anschliessend wieder in den Deep Sleep.
 
-Version: `1.3.0` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
+Version: `1.3.1` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
 
 ## Features
 
@@ -45,7 +45,13 @@ und danach `config.example.h`, lokale Werte ueberschreiben also die Standardwert
 #define WIFI_PASSWORD   "MeinPasswort"
 #define SERVER_BASE_URL "http://192.168.178.47:8787"
 #define DEVICE_ID       "esp32-eink-01"
+#define DEVICE_TOKEN    ""              // optional, gleicher Wert wie INKWALL_DEVICE_TOKEN am Server
 ```
+
+Der Geraete-Token (ab 1.3.1) geht als Header `X-Inkwall-Token` mit jeder Anfrage mit, auch beim
+Firmware-Download. Ist am Server `INKWALL_DEVICE_TOKEN` gesetzt, gibt es `/firmware.bin` (enthaelt
+das WLAN-Passwort) und `/ack` nur noch mit Token. Reihenfolge: erst die Firmware mit Token
+einspielen, danach den Token im Container setzen.
 
 Schalter in `config.example.h` (per `config.private.h` ueberschreibbar):
 

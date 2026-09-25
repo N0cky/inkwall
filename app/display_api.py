@@ -527,11 +527,16 @@ def _all_known_fields() -> list[dict]:
     return fields
 
 
+def secret_field_names() -> set[str]:
+    """Passwort-Felder und Felder mit "secret": True (Webhook-Adresse, private Kalender-Links …)."""
+    return {f["name"] for f in _all_known_fields() if f.get("type") == "password" or f.get("secret")}
+
+
 def export_settings(include_secrets: bool = False) -> dict[str, Any]:
-    """Alle bekannten Settings als {key: value}. Passwörter nur auf Wunsch."""
+    """Alle bekannten Settings als {key: value}. Passwörter, Webhook- und Kalender-Links nur auf Wunsch."""
     values = get_settings_values()
     fields = _all_known_fields()
-    secret_keys = {f["name"] for f in fields if f.get("type") == "password"}
+    secret_keys = secret_field_names()
     exported = {
         f["name"]: values.get(f["name"], "")
         for f in fields

@@ -203,6 +203,7 @@ SETTINGS_FIELDS: list[dict] = [
     # ── Benachrichtigung ─────────────────────────────────────────────────────
     {
         "name":        "NOTIFY_URL",
+        "secret":      True,          # steckt ein Zugangsweg drin: nicht im Export „ohne Geheimnisse“
         "label":       "Benachrichtigung an",
         "type":        "text",
         "section":     "framework",

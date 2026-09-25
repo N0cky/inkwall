@@ -27,6 +27,7 @@ log = get_logger(__name__)
 SETTINGS_FIELDS: list[dict] = [
     {
         "name":        "GARBAGE_ICS_URLS",
+        "secret":      True,          # steckt ein Zugangsweg drin: nicht im Export „ohne Geheimnisse“
         "label":       "Abfuhrkalender",
         "type":        "list",
         "wide":        True,

@@ -39,6 +39,8 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Firmware 1.3.0: only newer versions are installed over the air (a USB-flashed 1.4.0 no longer falls back to a hosted 1.3.0); older versions and test builds need "Auch einspielen, wenn die Version nicht neuer ist" on the Gerät page (`firmware_force`). A file that fails to install is tried at most three times (again after 24 h or with another file); a rolled-back file is recognised by version and MD5, so a fixed rebuild with the same version number is installed
 - Firmware 1.3.0 reports why it started (`reset_reason`: power on, crash, watchdog, brownout …); the server logs crashes as an event and shows the last start on the Gerät page. Image hash, failure counter and "seit HH:MM" survive crash and watchdog resets (RTC memory with checksum); after a power cut the device remembers which image is still on the panel and does not redraw it
 - Firmware 1.3.0 asks for `/meta.json?sleep=from_meta` and subtracts the time spent after it (download, refresh, acknowledgement) from `next_wake_sec`; the server then only accounts for the time up to `/meta.json` (`meta_ms`). A cycle with a 30 s refresh no longer shifts the next wake-up past the rotation boundary
+- Optional device token (`INKWALL_DEVICE_TOKEN` in the container, `DEVICE_TOKEN` in the firmware from 1.3.1): `/firmware.bin` – which contains the Wi-Fi password – `/firmware.json` and `/ack` then need the token (header `X-Inkwall-Token`) or the UI password; images and `/meta.json` stay open
+- Firmware 1.3.1: sends the device token with every request including the firmware download; the line "wird mit dieser Rückmeldung bestätigt" now reaches the device log on the server
 
 ### Changed
 
@@ -67,6 +69,9 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Plex and Steam: in landscape (the default 1600 × 1200) the cover gets smaller so the text block fits above the progress bar; the "Aktualisiert" stamp is right-aligned to its actual width
 - Firmware 1.3.0: meta, hash and acknowledgement use a 10 s timeout (a server that accepted the connection but did not answer kept the device awake for minutes and ended in the watchdog); the watchdog is fed between phases; every sleep is bounded to 10 s … 6 h
 - Firmware 1.3.0: when the compact image is offered there is no 5.8 MB BMP fallback any more; a server rendering PNG or a different panel size gets a clear error instead of a futile download; a failed image is retried after 2 minutes, at most three times per image
+- Writing requests from other websites are refused (`Sec-Fetch-Site`, `Origin`) – the browser sends stored Basic Auth along, so a page in the network could otherwise upload a firmware the display installs; devices, curl and webhooks are not affected
+- "Einstellungen sichern" without secrets leaves out the notification address and the calendar, garbage and transport API links as well (fields marked `"secret": True`)
+- Webhook tokens, ntfy topics, private calendar links, credentials in URLs and all configured secret values are masked in log lines and in error messages of the web UI; `/health` shows content details only without a UI password or when signed in; uploads are limited to 4 MB; the UI password is compared in constant time; only known acknowledgement results become metric labels
 
 ### Fixed
 
@@ -97,6 +102,7 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Firmware: a panel that did not answer (BUSY timeout, loose ribbon cable) was reported as "updated"; it is an error now, and the panel gets time to power off between the two fills of the cleaning cycle
 - Firmware: the `/hash` fallback accepted any HTTP 200 body (a captive portal page counted as a hash); both meta and hash must be 32 hex characters now
 - Firmware: the offline image in flash was truncated before it was rewritten – a power cut while saving left the banner on a white page; it is written to a temporary file and renamed
+- `ui.esc()` did not escape `'`, while some attributes are single-quoted (a label with an apostrophe could break the settings page)
 
 ## [0.1.0] - 2026-04-20
 

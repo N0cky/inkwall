@@ -2,9 +2,10 @@
 window.ui = (function () {
     'use strict';
 
+    // Auch ' – fields.js setzt Werte in Attribute mit einfachen Anführungszeichen
     function esc(s) {
         return String(s == null ? '' : s)
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     async function json(url, options) {
