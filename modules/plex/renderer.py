@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from app.config import get_bool_setting, get_cfg, load_font, now_local
 from app.image_rendering import SPECTRA6_COLORS, draw_bottom_gradient
-from app.text_rendering import draw_lines, fit_wrapped_text
+from app.text_rendering import draw_lines, fit_wrapped_text, new_draw
 
 from .plex import get_playback_label
 
@@ -19,7 +19,6 @@ from .plex import get_playback_label
 OVERLAY_X_MARGIN      = 80    # px linker/rechter Rand für Text im Overlay
 PROGRESS_BAR_Y_OFFSET = 55    # px Abstand Progress-Bar vom unteren Bildrand
 PROGRESS_BAR_HEIGHT   = 18    # px Höhe des Fortschrittsbalkens
-TIMESTAMP_X_OFFSET    = 420   # px Abstand Timestamp vom rechten Rand
 TIMESTAMP_Y           = 40    # px Abstand Timestamp vom oberen Rand
 PROGRESS_BOTTOM_RESERVE = 60  # px Puffer für Progress-Bar-Block
 STATUS_BOTTOM_RESERVE   = 45  # px Puffer für Status-Label-Block
@@ -60,19 +59,20 @@ def draw_progress_bar(
         return
     # Separate RGBA-Schicht, damit alpha korrekt auf dem RGB-Bild landet.
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
+    d = new_draw(overlay)
     d.rounded_rectangle([(x, y), (x + width, y + height)], radius=8, fill=(255, 255, 255, 70))
     d.rounded_rectangle([(x, y), (x + int(width * progress), y + height)], radius=8, fill=(255, 255, 255, 210))
     img.paste(Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB"))
 
 
 def draw_updated_timestamp(
-    draw: ImageDraw.ImageDraw, font, text_x: int, text_y: int, show: bool
+    draw: ImageDraw.ImageDraw, font, right_x: int, text_y: int, show: bool
 ) -> None:
+    """Stempel rechtsbündig bis right_x – die Breite hängt von Schrift und Datum ab, nicht von einer festen Spalte."""
     if not show:
         return
     stamp = now_local().strftime("Aktualisiert: %d.%m.%Y %H:%M")
-    draw.text((text_x, text_y), stamp, font=font, fill=(255, 255, 255, 230))
+    draw.text((right_x - draw.textlength(stamp, font=font), text_y), stamp, font=font, fill=(255, 255, 255, 230))
 
 
 def get_bottom_reserved_space(show_progress_bar: bool) -> int:
@@ -86,7 +86,7 @@ def get_bottom_reserved_space(show_progress_bar: bool) -> int:
 def _setup_overlay_base(cfg, base: Image.Image, overlay_h_fraction: float, alpha_max: int):
     """Bereitet die gemeinsame Grundstruktur beider Overlays vor."""
     img  = base.copy()
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     font_small  = load_font(28, is_bold=False)
     overlay_h   = int(cfg.render_height * overlay_h_fraction)
     draw_bottom_gradient(img, overlay_h, alpha_max, cfg.render_width, cfg.render_height)
@@ -161,7 +161,7 @@ def draw_video_overlay(base: Image.Image, session: dict) -> Image.Image:
     show_progress = get_bool_setting("SHOW_PROGRESS_BAR", True)
     show_updated = get_bool_setting("SHOW_UPDATED_TIMESTAMP", True)
     draw_progress_bar(img, calc_progress(session), x, py, cfg.render_width - 2 * x, PROGRESS_BAR_HEIGHT, show_progress)
-    draw_updated_timestamp(draw, font_small, cfg.render_width - TIMESTAMP_X_OFFSET, TIMESTAMP_Y, show_updated)
+    draw_updated_timestamp(draw, font_small, cfg.render_width - OVERLAY_X_MARGIN, TIMESTAMP_Y, show_updated)
     return img
 
 
@@ -216,7 +216,7 @@ def draw_music_overlay(base: Image.Image, session: dict) -> Image.Image:
     show_progress = get_bool_setting("SHOW_PROGRESS_BAR", True)
     show_updated = get_bool_setting("SHOW_UPDATED_TIMESTAMP", True)
     draw_progress_bar(img, calc_progress(session), x, py, cfg.render_width - 2 * x, PROGRESS_BAR_HEIGHT, show_progress)
-    draw_updated_timestamp(draw, font_small, cfg.render_width - TIMESTAMP_X_OFFSET, TIMESTAMP_Y, show_updated)
+    draw_updated_timestamp(draw, font_small, cfg.render_width - OVERLAY_X_MARGIN, TIMESTAMP_Y, show_updated)
     return img
 
 
@@ -267,7 +267,7 @@ def draw_video_overlay_light(base: Image.Image, session: dict, cover_bottom: int
     cfg = get_cfg()
     pal = _flat_palette(cfg.display_theme)
     img  = base.copy()
-    draw = ImageDraw.Draw(img)
+    draw = new_draw(img)
 
     title        = session.get("title", "Unbekannt")
     grandparent  = session.get("grandparentTitle", "")
@@ -326,7 +326,7 @@ def draw_video_overlay_light(base: Image.Image, session: dict, cover_bottom: int
     if show_updated:
         # Unterhalb des Textblocks statt oben rechts – dort läge der Stempel auf dem Cover
         stamp = now_local().strftime("Aktualisiert: %d.%m.%Y %H:%M")
-        draw.text((cfg.render_width - TIMESTAMP_X_OFFSET, text_bottom + 14), stamp,
+        draw.text((cfg.render_width - x - draw.textlength(stamp, font=font_small), text_bottom + 14), stamp,
                   font=font_small, fill=pal["text_meta"])
     return img
 
@@ -335,7 +335,7 @@ def draw_music_overlay_light(base: Image.Image, session: dict, cover_bottom: int
     cfg = get_cfg()
     pal = _flat_palette(cfg.display_theme)
     img  = base.copy()
-    draw = ImageDraw.Draw(img)
+    draw = new_draw(img)
 
     title        = session.get("title", "Unbekannt")
     artist       = session.get("grandparentTitle", "")
@@ -396,6 +396,6 @@ def draw_music_overlay_light(base: Image.Image, session: dict, cover_bottom: int
     if show_updated:
         # Unterhalb des Textblocks statt oben rechts – dort läge der Stempel auf dem Cover
         stamp = now_local().strftime("Aktualisiert: %d.%m.%Y %H:%M")
-        draw.text((cfg.render_width - TIMESTAMP_X_OFFSET, text_bottom + 14), stamp,
+        draw.text((cfg.render_width - x - draw.textlength(stamp, font=font_small), text_bottom + 14), stamp,
                   font=font_small, fill=pal["text_meta"])
     return img

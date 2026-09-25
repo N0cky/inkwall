@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.config import load_font, now_local
-from app.text_rendering import draw_lines, fit_wrapped_text
+from app.text_rendering import draw_lines, fit_wrapped_text, new_draw
 from app.image_rendering import (
     SPECTRA6_COLORS,
     create_centered_cover_canvas,
@@ -39,7 +39,7 @@ def _draw_avatar(base: Image.Image, avatar: Image.Image | None, x: int, y: int, 
         return
     thumb = avatar.resize((size, size), Image.LANCZOS).convert("RGBA")
     mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([(0, 0), (size - 1, size - 1)], radius=22, fill=255)
+    new_draw(mask).rounded_rectangle([(0, 0), (size - 1, size - 1)], radius=22, fill=255)
     thumb.putalpha(mask)
     base.alpha_composite(thumb, (x, y))
 
@@ -54,7 +54,7 @@ def render_steam_dark(
 ) -> Image.Image:
     base = create_centered_cover_canvas(artwork, render_width, render_height).convert("RGBA")
     draw_bottom_gradient(base, int(render_height * 0.40), 230, render_width, render_height)
-    draw = ImageDraw.Draw(base, "RGBA")
+    draw = new_draw(base, "RGBA")
     persona_name = str(content.get("personaname", "")).strip() or "Steam User"
 
     avatar_size = 148
@@ -109,7 +109,8 @@ def render_steam_dark(
 
     if show_timestamp:
         stamp = now_local().strftime("Aktualisiert: %d.%m.%Y %H:%M")
-        draw.text((render_width - 420, 42), stamp, font=load_font(26, False), fill=(220, 225, 232, 220))
+        stamp_font = load_font(26, False)
+        draw.text((render_width - 40 - draw.textlength(stamp, font=stamp_font), 42), stamp, font=stamp_font, fill=(220, 225, 232, 220))
 
     return base.convert("RGB")
 
@@ -129,7 +130,7 @@ def render_steam_light(
     else:
         base, cover_bottom = create_light_cover_canvas(artwork, render_width, render_height)
     base = base.convert("RGBA")
-    draw = ImageDraw.Draw(base, "RGBA")
+    draw = new_draw(base, "RGBA")
     persona_name = str(content.get("personaname", "")).strip() or "Steam User"
 
     avatar_size = 150
@@ -186,6 +187,7 @@ def render_steam_light(
 
     if show_timestamp:
         stamp = now_local().strftime("Aktualisiert: %d.%m.%Y %H:%M")
-        draw.text((render_width - 420, 40), stamp, font=load_font(24, False), fill=col["stamp"])
+        stamp_font = load_font(24, False)
+        draw.text((render_width - 40 - draw.textlength(stamp, font=stamp_font), 40), stamp, font=stamp_font, fill=col["stamp"])
 
     return base.convert("RGB")

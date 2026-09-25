@@ -192,12 +192,30 @@ def render(self, env, content):
 
 Gemeinsame Zeichen-Helfer fuer alle Module:
 
-- `app/text_rendering.py`: `wrap_text`, `fit_wrapped_text`, `fit_optional_text_block`, `draw_lines`
+- `app/text_rendering.py`: `new_draw`, `page_scale`, `tile_scale`, `wrap_text` (kuerzt auch einzelne
+  ueberlange Woerter mit „…“), `ellipsize`, `fit_wrapped_text`, `fit_optional_text_block`, `draw_lines`
 - `app/image_rendering.py`: `resize_to_fit`, `fit_crop`, `create_blurred_cover_background`,
   `create_centered_cover_canvas`, `create_light_cover_canvas`, `create_rounded_thumbnail`,
   `draw_bottom_gradient`, `convert_to_spectra6`
 
 Alles Modul-spezifische (Plex-Overlays, Tagesschau-Karten, Steam-Layout) liegt im jeweiligen Modulordner.
+
+### E-Ink-Theme (`display_theme == "eink"`)
+
+Das Panel kennt sechs Farben (`SPECTRA6_COLORS`). Alles, was nicht exakt eine davon ist, wird
+beim Dithern zu bunten Punkten. Deshalb im E-Ink-Theme:
+
+- Zeichenflaechen mit `new_draw(img, "RGBA")` statt `ImageDraw.Draw(...)` anlegen: Text wird dann
+  ohne Kantenglaettung gesetzt (`fontmode = "1"`). Graue Kantenpixel wuerden sonst um jeden
+  Buchstaben zu blauen und gruenen Punkten.
+- Nur Spectra-Farben, alles deckend: keine halbtransparenten Toenungen, kein Blur, kein Verlauf,
+  kein halbtransparentes Schwarz fuer „zurueckgenommenen“ Text (das ist Grau).
+- Fotos bleiben Fotos: sie werden gedithert, am besten vorher mit `prepare_photo_for_eink()`.
+- Groessen aus der 1200-px-Vorlage mit `page_scale(breite, hoehe)` (Vollbild) bzw.
+  `tile_scale(breite)` (Kachel) umrechnen, damit auch 800 × 480 passt.
+
+`tests/test_eink_rendering.py` prueft fuer die eingebauten Module, dass flache Seiten zu 100 %
+auf der Palette liegen.
 
 ## Laufzeit-Status
 

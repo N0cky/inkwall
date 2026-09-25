@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.config import WEEKDAYS_DE_LONG, format_date_long, format_weekday_short
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
-from app.text_rendering import draw_lines, fit_wrapped_text
+from app.text_rendering import draw_lines, ellipsize, fit_wrapped_text, new_draw
 
 Color = tuple[int, int, int, int]
 
@@ -113,7 +113,7 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
     load_font = services.load_font
 
     img = Image.new("RGBA", (rw, rh), pal["bg"])
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     margin = max(40, rw // 20) if not compact else max(24, rw // 30)
     scale = max(0.5, min(rw / 1200.0, 1.4)) if compact else min(rw / 1200.0, rh / 1600.0)
 
@@ -126,7 +126,8 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
 
     # ── Kopfzeile ────────────────────────────────────────────────────────────
     if compact:
-        draw.text((margin, px(14)), "Kalender", font=load_font(px(26), True), fill=pal["title"])
+        font_title = load_font(px(26), True)
+        draw.text((margin, px(14)), "Kalender", font=font_title, fill=pal["title"])
         legend_y = px(18)
         y = px(56)
     else:
@@ -139,6 +140,8 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
         if stale_text:
             f = load_font(px(24), False)
             draw.text((rw - margin - draw.textlength(stale_text, font=f), px(52)), stale_text, font=f, fill=pal["muted"])
+    # Die Legende steht in der Zeile des Titels und darf nicht in ihn hineinlaufen
+    legend_min_x = margin + int(draw.textlength("Kalender", font=font_title)) + px(24)
 
     # Legende der Quellen rechts oben (kompakt: „Stand vom“ hat Vorrang, die Legende rückt links davon)
     lx = rw - margin
@@ -146,8 +149,10 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
         draw.text((lx - draw.textlength(stale_text, font=font_legend), legend_y), stale_text, font=font_legend, fill=pal["muted"])
         lx -= int(draw.textlength(stale_text, font=font_legend)) + px(28)
     for src in reversed(sources[:4]):
-        label = src.get("label", "")
+        label = ellipsize(draw, src.get("label", ""), font_legend, px(260))
         tw = int(draw.textlength(label, font=font_legend))
+        if lx - tw - px(16) - px(14) < legend_min_x:
+            break                       # kein Platz mehr: lieber weniger Einträge als über den Titel
         lx -= tw
         draw.text((lx, legend_y), label, font=font_legend, fill=pal["muted"])
         lx -= px(16)
@@ -186,8 +191,16 @@ def render_calendar_module(services: ModuleRenderServices, content: object, comp
             col = pal["sources"].get(ev.get("color", "blue"), pal["sources"]["blue"])
             # Farbbalken der Quelle
             draw.rectangle([(margin, y + px(6)), (margin + bar_w, y + px(50))], fill=(*col, 255))
-            # Zeit
-            draw.text((margin + bar_w + px(16), y + px(10)), _time_label(ev), font=font_time, fill=pal["time"])
+            # Zeit – „10:00 – 11:30“ ist mit breiten Schriften (DejaVu im Container) länger als die Spalte
+            time_text = _time_label(ev)
+            time_max_w = time_col_w - bar_w - px(16) - px(10)
+            time_font = font_time
+            for size in range(px(26), px(18) - 1, -2):
+                time_font = load_font(max(8, size), True)
+                if draw.textlength(time_text, font=time_font) <= time_max_w:
+                    break
+            draw.text((margin + bar_w + px(16), y + px(10)), ellipsize(draw, time_text, time_font, time_max_w),
+                      font=time_font, fill=pal["time"])
             # Titel (eine Zeile, ggf. gekürzt) + Ort
             text_x = margin + time_col_w
             text_w = rw - margin - text_x

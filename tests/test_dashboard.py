@@ -147,7 +147,7 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertTrue(key.startswith("dashboard:"))
         self.assertEqual(key, key2)
         self.assertEqual(server._esp32_state["media_type"], "dashboard")
-        self.assertEqual(len(a.tile_sizes), 2, "zweiter Tick komponiert erneut (billig), rendert aber nicht neu")
+        self.assertEqual(len(a.tile_sizes), 1, "zweiter Tick holt nur die Inhalte, die Kacheln werden nicht neu gerendert")
 
     def test_rotation_when_layout_is_rotation(self) -> None:
         _cfg(IDLE_LAYOUT="rotation", OUTPUT_FORMAT="png")

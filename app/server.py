@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, redirect, render_template, request, send_file, jsonify, url_for
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.logger import get_logger, log_event, redact_secrets, LOGS_DIR
 
@@ -393,28 +393,42 @@ def render_no_content_image() -> Image.Image:
         muted_col  = (125, 117, 108)
         border_col = (42, 42, 40)
 
+    from app.text_rendering import new_draw, wrap_text
     img  = Image.new("RGB", (w, h), bg_col)
-    draw = ImageDraw.Draw(img)
+    draw = new_draw(img)
+    # Entworfen für 1200 px Breite; auf kleinen Panels mitskalieren, Text bleibt im Kasten
+    s = max(0.5, min(1.4, w / 1200.0, h / 900.0))
 
-    box_w, box_h = min(680, w - 80), 280
+    def px(v: float) -> int:
+        return max(1, int(round(v * s)))
+
+    box_w = min(px(760), w - px(40))
+    inner_w = box_w - px(48)
+    font_head = load_font(px(36), True)
+    font_sub  = load_font(px(22), False)
+    font_hint = load_font(px(18), False)
+    blocks = [
+        (wrap_text(draw, "Noch kein Inhalt eingeschaltet", font_head, inner_w, 2), font_head, text_col, px(46)),
+        (wrap_text(draw, "Öffne die Weboberfläche im Browser und schalte unter „Anzeige“ einen Inhalt ein.",
+                   font_sub, inner_w, 3), font_sub, muted_col, px(30)),
+        (wrap_text(draw, "Quellen wie Wetter, Kalender oder Müllabfuhr richtest du unter „Inhalte“ ein.",
+                   font_hint, inner_w, 3), font_hint, muted_col, px(26)),
+    ]
+    gap = px(22)
+    content_h = sum(len(lines) * line_h for lines, _, _, line_h in blocks) + gap * (len(blocks) - 1)
+    box_h = min(h - px(20), content_h + px(64))
     bx = (w - box_w) // 2
     by = (h - box_h) // 2
     draw.rounded_rectangle((bx, by, bx + box_w, by + box_h),
-                            radius=24, outline=border_col, width=1)
+                            radius=0 if cfg.display_theme == "eink" else px(24), outline=border_col, width=max(1, px(2)))
 
-    cx        = w // 2
-    font_head = load_font(36, True)
-    font_sub  = load_font(22, False)
-    font_hint = load_font(18, False)
-
-    draw.text((cx, by + 72),  "Noch kein Inhalt eingeschaltet",
-              font=font_head, fill=text_col, anchor="mm")
-    draw.text((cx, by + 130), "Öffne die Weboberfläche im Browser",
-              font=font_sub, fill=muted_col, anchor="mm")
-    draw.text((cx, by + 160), "und schalte unter „Anzeige“ einen Inhalt ein.",
-              font=font_sub, fill=muted_col, anchor="mm")
-    draw.text((cx, by + 220), "Quellen wie Wetter, Kalender oder Müllabfuhr richtest du unter „Inhalte“ ein.",
-              font=font_hint, fill=muted_col, anchor="mm")
+    cx = w // 2
+    y = by + px(32)
+    for lines, font, color, line_h in blocks:
+        for line in lines:
+            draw.text((cx, y + line_h // 2), line, font=font, fill=color, anchor="mm")
+            y += line_h
+        y += gap
     return img
 
 
@@ -563,23 +577,31 @@ def _render_if_changed_locked(last_state_key: str | None) -> str | None:
     enabled_idle, rotation_seconds = _get_effective_idle_modules(env)
     env, cfg, _ = _effective_programme(env)
     if enabled_idle and cfg.idle_layout == "dashboard":
-        from app.dashboard import compose_dashboard
+        from app.dashboard import prepare_dashboard, render_dashboard
         try:
-            result = compose_dashboard(env, cfg, _dashboard_modules(enabled_idle, cfg))
+            prepared = prepare_dashboard(env, cfg, _dashboard_modules(enabled_idle, cfg))
         except Exception as exc:
             log.error(f"dashboard: {exc}", exc_info=True)
-            result = None
-        if result is not None:
-            image, state_key = result
+            prepared = None
+        if prepared is not None:
+            state_key = prepared.state_key
             needs_refresh = any(_module_hook(m, "should_refresh", False, env) for m in enabled_idle)
-            if state_key != last_state_key or needs_refresh:
+            # Kacheln (Fotos, Textsatz) nur rendern, wenn sich etwas geändert hat – nicht bei jedem Poll
+            if state_key == last_state_key and not needs_refresh:
+                return state_key
+            try:
+                image = render_dashboard(prepared)
+            except Exception as exc:
+                log.error(f"dashboard: {exc}", exc_info=True)
+                image = None
+            if image is not None:
                 try:
                     _save_image(image, state_key, "dashboard")
                 except Exception as exc:
                     log.error(f"render [dashboard]: {exc}", exc_info=True)
                     _count_render_error("dashboard")
                     return last_state_key
-            return state_key
+                return state_key
         # kein Inhalt in keiner Kachel → normale Rotation als Fallback
 
     # ── 2b. Idle-Module in Rotation (MODULE_PRIORITY >= 10) ──────────────────

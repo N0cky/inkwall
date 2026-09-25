@@ -94,6 +94,23 @@ COVER_MAX_FRACTION      = 0.78  # Anteil des Covers an der Rendergröße
 COVER_VERTICAL_OFFSET   = -30   # px vertikaler Versatz des zentrierten Covers
 LIGHT_BG_COLOR              = (250, 248, 244)
 LIGHT_COVER_VERTICAL_OFFSET = -185  # Cover im Light-Theme stark nach oben, damit unten Platz für Text ist
+# Unter dem Cover braucht der Textblock (Titel, Untertitel, Zeile, Fortschritt, Stempel)
+# rund so viel Höhe – unabhängig vom Format. Im Hochformat 1200 × 1600 ergibt sich damit
+# genau das bisherige Cover; im Querformat (Standard 1600 × 1200) wird es kleiner statt
+# den Text in den Fortschrittsbalken zu drücken.
+COVER_TEXT_RESERVE          = 336
+
+
+def _cover_box(img: Image.Image, target_w: int, target_h: int, top_min: int, vertical_offset: int) -> tuple[Image.Image, int, int]:
+    """Cover skaliert und platziert: (cover, x, y) – oben mindestens top_min, unten Platz für den Textblock."""
+    max_cover_w = int(target_w * COVER_MAX_FRACTION)
+    max_cover_h = max(1, min(int(target_h * COVER_MAX_FRACTION), target_h - COVER_TEXT_RESERVE - top_min))
+    cover = resize_to_fit(img, max_cover_w, max_cover_h)
+    cw, ch = cover.size
+    cx = (target_w - cw) // 2
+    cy = (target_h - ch) // 2 + vertical_offset
+    cy = max(top_min, min(cy, target_h - COVER_TEXT_RESERVE - ch))
+    return cover, cx, cy
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +194,8 @@ def create_flat_cover_canvas(
     Gibt (canvas, cover_bottom_y) zurück wie create_light_cover_canvas().
     """
     canvas = Image.new("RGB", (target_w, target_h), SPECTRA6_COLORS["white"])
-    max_cover_w = int(target_w * COVER_MAX_FRACTION)
-    max_cover_h = int(target_h * COVER_MAX_FRACTION)
-    cover = resize_to_fit(img, max_cover_w, max_cover_h)
+    cover, cx, cy = _cover_box(img, target_w, target_h, 16 + border_width, vertical_offset)
     cw, ch = cover.size
-    cx = (target_w - cw) // 2
-    cy = max(16 + border_width, (target_h - ch) // 2 + vertical_offset)
     draw = ImageDraw.Draw(canvas)
     draw.rectangle(
         [(cx - border_width, cy - border_width), (cx + cw + border_width - 1, cy + ch + border_width - 1)],
@@ -199,8 +212,9 @@ def stamp_render_time(img: Image.Image, theme: str, text: str) -> Image.Image:
     wenn Server oder WLAN ausgefallen sind. Das Dashboard hat die Angabe selbst.
     """
     from app.config import load_font
+    from app.text_rendering import new_draw
     out = img.convert("RGBA")
-    draw = ImageDraw.Draw(out, "RGBA")
+    draw = new_draw(out, "RGBA", flat=theme == "eink")
     scale = max(0.5, min(out.width / 1200.0, 1.4))
     font = load_font(max(12, int(22 * scale)), True)
     pad_x, pad_y = int(14 * scale), int(7 * scale)
@@ -287,16 +301,9 @@ def create_light_cover_canvas(
     blurred_bg.alpha_composite(veil)
     bg_rgba = blurred_bg
 
-    # ── 2. Cover – identische Größe wie Dark-Theme, aber stärker nach oben ──
-    max_cover_w = int(target_w * COVER_MAX_FRACTION)
-    max_cover_h = int(target_h * COVER_MAX_FRACTION)
-    cover       = resize_to_fit(img, max_cover_w, max_cover_h)
+    # ── 2. Cover – wie im Dark-Theme, aber stärker nach oben und mit Platz für den Text ──
+    cover, cx, cy = _cover_box(img, target_w, target_h, 16, LIGHT_COVER_VERTICAL_OFFSET)
     cw, ch      = cover.size
-
-    # Stärkerer Versatz nach oben, damit unten Platz für Text entsteht
-    cx = (target_w - cw) // 2
-    cy = (target_h - ch) // 2 + LIGHT_COVER_VERTICAL_OFFSET
-    cy = max(16, cy)  # nie über den oberen Bildrand
     cover_bottom = cy + ch  # tatsächliche Unterkante des Covers
 
     # ── 3. Schatten ──────────────────────────────────────────────────────────

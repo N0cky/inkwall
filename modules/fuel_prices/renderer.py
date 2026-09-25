@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 from app.config import WEEKDAYS_DE, format_date_long
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
+from app.text_rendering import new_draw
 
 Color = tuple[int, int, int, int]
 
@@ -562,7 +563,7 @@ def render_fuel_module(services: ModuleRenderServices, content: object, compact:
     load_font = services.load_font
 
     img = Image.new("RGBA", (rw, rh), pal["bg"])
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     margin = max(40, rw // 20) if not compact else max(24, rw // 30)
     scale = max(0.5, min(rw / 1200.0, 1.4)) if compact else max(0.35, min(1.0, rw / 1200.0, rh / 1200.0))
 

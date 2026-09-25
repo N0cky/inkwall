@@ -1,15 +1,45 @@
 """
-Generische Text-Utilities für alle Renderer: Zeilenumbruch, Einpassen in
-eine Box mit fallender Schriftgröße, mehrzeiliges Zeichnen.
+Generische Text-Utilities für alle Renderer: Zeichenfläche, Maßstab,
+Zeilenumbruch, Kürzen mit Ellipse, Einpassen in eine Box mit fallender
+Schriftgröße, mehrzeiliges Zeichnen.
 """
 
 from __future__ import annotations
 
 from typing import Callable
 
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 FontLoader = Callable[[int, bool], object]
+
+ELLIPSIS = "…"
+
+
+def new_draw(img: Image.Image, mode: str | None = None, flat: bool | None = None) -> ImageDraw.ImageDraw:
+    """
+    ImageDraw für Renderer. Im flachen E-Ink-Theme ohne Kantenglättung der
+    Schrift (fontmode "1"): graue Kantenpixel liegen zwischen den sechs
+    Panelfarben, und das Dithering macht aus ihnen blaue und grüne Punkte
+    rund um jeden Buchstaben. Das Panel kann ohnehin nur harte Kanten zeigen.
+    flat=None: aus dem eingestellten Theme (in Vorschauen das Vorschau-Theme).
+    """
+    draw = ImageDraw.Draw(img, mode)
+    if flat is None:
+        from app.config import get_cfg, is_flat_theme
+        flat = is_flat_theme(get_cfg().display_theme)
+    if flat:
+        draw.fontmode = "1"
+    return draw
+
+
+def page_scale(width: int, height: int) -> float:
+    """Maßstab einer Vollbild-Seite, entworfen für 1200 × 1600: kleiner wird verkleinert, größer nicht vergrößert."""
+    return max(0.35, min(1.0, width / 1200.0, height / 1200.0))
+
+
+def tile_scale(width: int) -> float:
+    """Maßstab einer Dashboard-Kachel nach ihrer Breite."""
+    return max(0.5, min(width / 1200.0, 1.4))
 
 
 def get_text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
@@ -17,11 +47,43 @@ def get_text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
+def ellipsize(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """Text auf max_width kürzen, mit „…“ am Ende. Passt er, bleibt er, wie er ist."""
+    text = text or ""
+    if max_width <= 0:
+        return ""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    # Binärsuche über die Länge statt Zeichen für Zeichen
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if draw.textlength(text[:mid].rstrip() + ELLIPSIS, font=font) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return (text[:lo].rstrip() + ELLIPSIS) if lo > 0 else ELLIPSIS
+
+
 def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines: int | None = None) -> list[str]:
+    """
+    Zeilenumbruch an Wortgrenzen. Jedes Wort wird einmal vermessen (nicht jede
+    wachsende Zeile neu – das war bei langen Texten quadratisch). Ein einzelnes
+    Wort, das breiter ist als die Zeile, wird mit „…“ gekürzt statt über den
+    Rand zu laufen; bei max_lines endet die letzte Zeile mit „…“.
+    """
     if not text:
         return []
 
-    lines = []
+    space_w = draw.textlength(" ", font=font)
+    widths: dict[str, float] = {}
+
+    def width_of(word: str) -> float:
+        if word not in widths:
+            widths[word] = draw.textlength(word, font=font)
+        return widths[word]
+
+    lines: list[str] = []
     truncated = False
     paragraphs = text.splitlines() or [text]
 
@@ -35,16 +97,15 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_li
                     break
             continue
 
-        current = words[0]
+        current, current_w = words[0], width_of(words[0])
         for word in words[1:]:
-            candidate = f"{current} {word}"
-            width, _ = get_text_size(draw, candidate, font)
-
-            if width <= max_width:
-                current = candidate
+            word_w = width_of(word)
+            if current_w + space_w + word_w <= max_width:
+                current = f"{current} {word}"
+                current_w += space_w + word_w
             else:
                 lines.append(current)
-                current = word
+                current, current_w = word, word_w
 
                 if max_lines and len(lines) >= max_lines:
                     truncated = True
@@ -63,17 +124,13 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_li
         lines = lines[:max_lines]
         truncated = True
 
-    if truncated and lines:
-        last = lines[-1]
-        while True:
-            width, _ = get_text_size(draw, last + "…", font)
-            if width <= max_width:
-                lines[-1] = last + "…"
-                break
-            if len(last) <= 1:
-                lines[-1] = "…"
-                break
-            last = last[:-1].rstrip()
+    # Zu breite Einzelwörter (lange Zielhalte, URLs) kürzen
+    lines = [ellipsize(draw, line, font, max_width) if line and draw.textlength(line, font=font) > max_width else line
+             for line in lines]
+
+    if truncated and lines and not lines[-1].endswith(ELLIPSIS):
+        # passt „Zeile…“ nicht, kürzt ellipsize die Zeile selbst und hängt „…“ an
+        lines[-1] = ellipsize(draw, lines[-1] + ELLIPSIS, font, max_width)
 
     return lines
 

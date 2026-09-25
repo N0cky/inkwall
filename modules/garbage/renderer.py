@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 from app.config import format_date_long, format_weekday_short
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
-from app.text_rendering import draw_lines, fit_wrapped_text
+from app.text_rendering import draw_lines, fit_wrapped_text, new_draw
 
 Color = tuple[int, int, int, int]
 
@@ -456,7 +456,7 @@ def render_garbage_module(services: ModuleRenderServices, content: object, compa
     load_font = services.load_font
 
     img = Image.new("RGBA", (rw, rh), pal["bg"])
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
     margin = max(40, rw // 20) if not compact else max(24, rw // 30)
     scale = max(0.5, min(rw / 1200.0, 1.4)) if compact else min(rw / 1200.0, rh / 1600.0)

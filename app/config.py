@@ -863,6 +863,10 @@ def apply_runtime_config(settings: dict[str, str] | None = None) -> None:
 
     base_w   = _parse_int(settings, "RENDER_WIDTH",  1600, 400, 3840)
     base_h   = _parse_int(settings, "RENDER_HEIGHT", 1200, 300, 2160)
+    # Gerade Maße: das kompakte Panel-Format packt zwei Pixel je Byte, und mit
+    # 90°/270° wird die Höhe zur Breite – eine ungerade Zahl ließe jeden Render scheitern
+    base_w  -= base_w % 2
+    base_h  -= base_h % 2
     rotation = parse_display_rotation(get_env_value(settings, "DISPLAY_ROTATION", "0"))
     render_w, render_h = get_effective_render_size(base_w, base_h, rotation)
 

@@ -56,6 +56,11 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - Theme previews no longer take the render lock and no longer swap the global configuration (the override lives in the request's thread); saving settings no longer waits for a running render, which keeps working with the configuration it started with
 - Notifications of an acknowledgement are sent in the background, the device no longer waits for a Discord upload
 - HTTP: read timeouts are not retried, `Retry-After` is ignored (urllib3 slept as long as the server asked, under the render lock) and connecting gives up after 6 s
+- E-Ink theme: text is set without anti-aliasing (`new_draw()`, `fontmode "1"`). The grey edge pixels of every letter used to become blue and green specks when dithered; flat pages (weather, Abfahrten, Tankpreise, Müllabfuhr, Kalender, placeholder, time stamp) are now 100 % on the six panel colours, only photos are dithered
+- The dashboard fetches its contents on every poll but renders the tiles (photos, text layout) only when a state key changed or a content asks for it
+- Gallery decodes large JPEGs at the size the page needs (a 24 MP photo took half a second and about 450 MB of memory) and prepares the smaller image for the panel
+- Word wrapping measures every word once instead of re-measuring the growing line (Tagesschau renders about a third faster)
+- Plex and Steam: in landscape (the default 1600 × 1200) the cover gets smaller so the text block fits above the progress bar; the "Aktualisiert" stamp is right-aligned to its actual width
 
 ### Fixed
 
@@ -75,6 +80,14 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 - The offline banner test clicked during a running device cycle was dropped by that cycle's acknowledgement
 - Abfahrten: stop names that cannot be resolved (typo, API down) are no longer searched on every render, summary and scrape; resolved stops are remembered per API, so switching from DB to VBB resolves them again
 - Tankpreise: "Verbindung prüfen" sent the same `list.php` request twice; stations without details are asked again after an hour instead of every five minutes
+- Weather warnings in the E-Ink theme were tinted, semi-transparent cards with an orange pill and white text – about two thirds of the strip turned into dither noise on the panel. Flat now: yellow strip, white cards with a black border, red pill from severe weather on, otherwise yellow
+- Weather warnings used fixed pixel sizes: on small panels (800 × 480) they pushed the hourly chart and the forecast off the image. They scale with the page now, and only as many cards as fit are shown ("+1 weitere Warnung")
+- Weather tile: stat panels and forecast strip ignored the tile scale and overflowed into each other
+- Pollen strip and UV icon in the E-Ink theme used semi-transparent black and colours outside the palette (grey text, orange/violet UV)
+- Tagesschau crashed on small panels (800 × 480: negative card height); the page scales now, shows as many headlines as fit and leaves out the photo when a card is too small for it
+- A single word wider than its column (long destinations in Abfahrten, calendar titles, warning headlines) ran over the edge; it is shortened with "…" now. The Abfahrten stop heading, the calendar legend (no longer runs into the title) and the calendar time column ("10:00 – 11:30" with the wider container font) are bounded as well
+- An odd render width (or height with 90°/270° rotation) made every BMP render fail; sizes are rounded down to even numbers
+- The "no content" placeholder scales with the page and wraps its text
 
 ## [0.1.0] - 2026-04-20
 

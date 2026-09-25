@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.config import format_date_long
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
-from app.text_rendering import fit_wrapped_text
+from app.text_rendering import ellipsize, fit_wrapped_text, new_draw
 
 Color = tuple[int, int, int, int]
 
@@ -113,7 +113,7 @@ def render_departures_module(services: ModuleRenderServices, content: object, co
     load_font = services.load_font
 
     img = Image.new("RGBA", (rw, rh), pal["bg"])
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     margin = max(40, rw // 20) if not compact else max(24, rw // 30)
     scale = max(0.5, min(rw / 1200.0, 1.4)) if compact else max(0.35, min(1.0, rw / 1200.0, rh / 1200.0))
 
@@ -163,7 +163,7 @@ def render_departures_module(services: ModuleRenderServices, content: object, co
             heading = section.get("label") or section.get("name") or "Haltestelle"
             if section.get("name") and section.get("label") and section["name"] != section["label"]:
                 heading = f"{section['label']}  ·  {section['name']}"
-            draw.text((margin, y), heading, font=font_section, fill=pal["title"])
+            draw.text((margin, y), ellipsize(draw, heading, font_section, rw - 2 * margin), font=font_section, fill=pal["title"])
             if section.get("stale_since") and not stale_text:
                 pass
             y += px(42)

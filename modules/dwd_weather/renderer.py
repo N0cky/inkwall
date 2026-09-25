@@ -11,7 +11,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from app.config import format_date_long, format_weekday_short
 from app.image_rendering import SPECTRA6_COLORS
 from app.module_services import ModuleRenderServices
-from app.text_rendering import draw_lines, fit_wrapped_text
+from app.text_rendering import draw_lines, fit_wrapped_text, new_draw
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -533,12 +533,12 @@ def apply_glass_panel(
     crop.alpha_composite(Image.new("RGBA", crop.size, tint))
 
     mask = Image.new("L", crop.size, 0)
-    mask_draw = ImageDraw.Draw(mask)
+    mask_draw = new_draw(mask)
     mask_draw.rounded_rectangle((0, 0, crop.size[0], crop.size[1]), radius=radius, fill=255)
     crop.putalpha(mask)
     img.alpha_composite(crop, dest=(bounds[0], bounds[1]))
 
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     draw.rounded_rectangle(bounds, radius=radius, outline=outline, width=2)
 
 
@@ -662,7 +662,7 @@ def draw_moon_disc(img: Image.Image, cx: int, cy: int, r: int,
     pad  = 2
     size = (r + pad) * 2
     moon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    md   = ImageDraw.Draw(moon, "RGBA")
+    md   = new_draw(moon, "RGBA")
     ox   = r + pad                                  # Mittelpunkt im moon-Image
     box  = [pad, pad, size - pad - 1, size - pad - 1]
 
@@ -702,7 +702,7 @@ def draw_stat_panel(img, bounds, title, value, icon_name, label_font, value_font
                       tint=pal["stat_glass_tint"],
                       outline=pal["stat_glass_outline"],
                       blur_radius=14)
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
     left, top, _, _ = bounds
 
     if icon_name == "humidity":
@@ -744,34 +744,44 @@ _WARNING_CARD_GAP = 10
 _WARNING_TITLE_H = 30
 _WARNING_TITLE_PAD_TOP = 12
 _WARNING_TITLE_PAD_BOTTOM = 10
+_WARNING_HINT_H = 24
 _WARNING_CARD_LIMIT = 2
 
 
-def _layout_warning_cards(warnings: list[dict], card_width: int, load_font) -> list[dict]:
+def _scaled(scale: float):
+    """px()-Helfer für einen Maßstab: Maße der 1200-px-Vorlage auf die Bildgröße."""
+    def px(v: float) -> int:
+        return max(1, int(round(v * scale)))
+    return px
+
+
+def _layout_warning_cards(warnings: list[dict], card_width: int, load_font, scale: float = 1.0,
+                          limit: int = _WARNING_CARD_LIMIT) -> list[dict]:
+    px = _scaled(scale)
     measure_img = Image.new("RGBA", (max(1, card_width), 220), (0, 0, 0, 0))
-    measure_draw = ImageDraw.Draw(measure_img, "RGBA")
+    measure_draw = new_draw(measure_img, "RGBA")
     layouts: list[dict] = []
 
-    for warning in warnings[:_WARNING_CARD_LIMIT]:
+    for warning in warnings[:max(1, limit)]:
         sev_label = warning_level_label(warning.get("level"))
-        pill_font = load_font(14, True)
+        pill_font = load_font(max(8, px(14)), True)
         pill_bb = measure_draw.textbbox((0, 0), sev_label, font=pill_font)
         pill_tw = pill_bb[2] - pill_bb[0]
-        pill_w = max(98, pill_tw + 22)
-        pill_h = 24
+        pill_w = max(px(98), pill_tw + px(22))
+        pill_h = px(24)
 
-        inner_left = 12
-        inner_right = 12
-        headline_x = inner_left + pill_w + 10
-        headline_width = max(80, card_width - headline_x - inner_right)
+        inner_left = px(12)
+        inner_right = px(12)
+        headline_x = inner_left + pill_w + px(10)
+        headline_width = max(px(80), card_width - headline_x - inner_right)
         headline = warning.get("headline") or warning.get("event") or "Amtliche Wetterwarnung"
         headline_font, headline_lines, headline_line_h, headline_spacing, headline_total_h = fit_wrapped_text(
             measure_draw,
             headline,
             max_width=headline_width,
-            max_height=30,
-            start_size=18,
-            min_size=15,
+            max_height=px(30),
+            start_size=max(9, px(18)),
+            min_size=max(8, px(15)),
             load_font=load_font,
             is_bold=True,
             max_lines=1,
@@ -783,17 +793,17 @@ def _layout_warning_cards(warnings: list[dict], card_width: int, load_font) -> l
         meta_font, meta_lines, meta_line_h, meta_spacing, meta_total_h = fit_wrapped_text(
             measure_draw,
             meta_text,
-            max_width=max(80, card_width - inner_left - inner_right),
-            max_height=54,
-            start_size=17,
-            min_size=13,
+            max_width=max(px(80), card_width - inner_left - inner_right),
+            max_height=px(54),
+            start_size=max(9, px(17)),
+            min_size=max(8, px(13)),
             load_font=load_font,
             max_lines=3,
             line_spacing=0.1,
         )
 
         header_h = max(pill_h, headline_total_h or headline_line_h)
-        card_h = 12 + header_h + 8 + meta_total_h + 12
+        card_h = px(12) + header_h + px(8) + meta_total_h + px(12)
         layouts.append({
             "warning": warning,
             "pill_text": sev_label,
@@ -815,18 +825,29 @@ def _layout_warning_cards(warnings: list[dict], card_width: int, load_font) -> l
     return layouts
 
 
-def warning_strip_height(warnings: list[dict], card_width: int, load_font) -> int:
+def warning_strip_height(warnings: list[dict], card_width: int, load_font, scale: float = 1.0,
+                         limit: int = _WARNING_CARD_LIMIT) -> int:
     if not warnings:
         return 0
-    layouts = _layout_warning_cards(warnings, card_width, load_font)
+    px = _scaled(scale)
+    layouts = _layout_warning_cards(warnings, card_width, load_font, scale, limit)
     return (
-        _WARNING_TITLE_PAD_TOP
-        + _WARNING_TITLE_H
-        + _WARNING_TITLE_PAD_BOTTOM
+        px(_WARNING_TITLE_PAD_TOP)
+        + px(_WARNING_TITLE_H)
+        + px(_WARNING_TITLE_PAD_BOTTOM)
         + sum(layout["card_h"] for layout in layouts)
-        + (max(0, len(layouts) - 1) * _WARNING_CARD_GAP)
-        + 14
+        + (max(0, len(layouts) - 1) * px(_WARNING_CARD_GAP))
+        + (px(_WARNING_HINT_H) if len(warnings) > len(layouts) else 0)
+        + px(14)
     )
+
+
+def warning_card_limit(warnings: list[dict], card_width: int, load_font, scale: float, budget: int) -> int:
+    """So viele Warnkarten, wie ins Höhenbudget passen – mindestens eine (der Rest wird als „+N weitere“ genannt)."""
+    for limit in range(_WARNING_CARD_LIMIT, 0, -1):
+        if warning_strip_height(warnings, card_width, load_font, scale, limit) <= budget:
+            return limit
+    return 1
 
 
 def _warning_time_label(warning: dict) -> str:
@@ -845,75 +866,95 @@ def draw_warning_strip(
     small_font,
     pal: dict,
     load_font,
+    scale: float = 1.0,
+    limit: int = _WARNING_CARD_LIMIT,
 ) -> None:
+    """
+    Warnleiste mit bis zu `limit` Karten. Flach (E-Ink): gelbe Leiste, weiße
+    Karten mit schwarzem Rand, Stufen-Pille rot (ab Unwetter) oder gelb –
+    alles deckend in Panelfarben, keine Tönungen, die zu Dithering-Rauschen würden.
+    """
     if not warnings:
         return
 
+    px = _scaled(scale)
+    flat = bool(pal.get("flat"))
     left, top, right, bottom = bounds
     apply_glass_panel(
         img,
         bounds,
-        radius=22,
+        radius=px(22),
         tint=pal["warning_glass_tint"],
         outline=pal["warning_glass_outline"],
-        blur_radius=10,
+        blur_radius=0 if flat else 10,
     )
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
-    title_y = top + _WARNING_TITLE_PAD_TOP
-    draw_fa_icon(draw, left + 18, title_y + 1, "warning", 18, pal["warning_title"])
+    title_y = top + px(_WARNING_TITLE_PAD_TOP)
+    draw_fa_icon(draw, left + px(18), title_y + 1, "warning", px(18), pal["warning_title"])
     count = len(warnings)
     title = "Amtliche Warnungen"
     if count == 1:
         title += " · 1 Warnung"
     else:
         title += f" · {count} Warnungen"
-    draw.text((left + 44, title_y), title, font=title_font, fill=pal["warning_title"])
+    draw.text((left + px(44), title_y), title, font=title_font, fill=pal["warning_title"])
 
-    card_left = left + 14
-    card_right = right - 14
-    card_top = top + _WARNING_TITLE_PAD_TOP + _WARNING_TITLE_H + _WARNING_TITLE_PAD_BOTTOM
-    layouts = _layout_warning_cards(warnings, card_right - card_left, load_font)
+    card_left = left + px(14)
+    card_right = right - px(14)
+    card_top = top + px(_WARNING_TITLE_PAD_TOP) + px(_WARNING_TITLE_H) + px(_WARNING_TITLE_PAD_BOTTOM)
+    layouts = _layout_warning_cards(warnings, card_right - card_left, load_font, scale, limit)
 
     current_top = card_top
     for layout in layouts:
         warning = layout["warning"]
         card_bounds = (card_left, current_top, card_right, current_top + layout["card_h"])
-        sev_rgb = warning_level_color(warning.get("level"))
+        sev_rgb = warning_level_color(warning.get("level"), flat=flat)
+        if flat:
+            card_tint, card_outline = _spectra("white"), _spectra("black")
+            pill_fill = (*sev_rgb, 255)
+            pill_text_fill = _spectra("white") if sev_rgb == SPECTRA6_COLORS["red"] else _spectra("black")
+            pill_outline = None if sev_rgb == SPECTRA6_COLORS["red"] else _spectra("black")
+        else:
+            card_tint, card_outline = (*sev_rgb, 34), (*sev_rgb, 120)
+            pill_fill, pill_text_fill, pill_outline = (*sev_rgb, 220), (255, 255, 255, 255), None
         apply_glass_panel(
             img,
             card_bounds,
-            radius=18,
-            tint=(*sev_rgb, 34),
-            outline=(*sev_rgb, 120),
-            blur_radius=8,
+            radius=px(18),
+            tint=card_tint,
+            outline=card_outline,
+            blur_radius=0 if flat else 8,
         )
-        draw = ImageDraw.Draw(img, "RGBA")
+        draw = new_draw(img, "RGBA")
 
-        pill_left = card_left + 12
-        pill_top = current_top + 12
+        pill_left = card_left + px(12)
+        pill_top = current_top + px(12)
         pill_h = layout["pill_h"]
         pill_text = layout["pill_text"]
         pill_font = layout["pill_font"]
         pill_bb = draw.textbbox((0, 0), pill_text, font=pill_font)
         pill_tw = pill_bb[2] - pill_bb[0]
+        pill_th = pill_bb[3] - pill_bb[1]
         pill_w = layout["pill_w"]
         draw.rounded_rectangle(
             (pill_left, pill_top, pill_left + pill_w, pill_top + pill_h),
-            radius=12,
-            fill=(*sev_rgb, 220),
+            radius=px(12),
+            fill=pill_fill,
+            outline=pill_outline,
+            width=1 if pill_outline else 0,
         )
         draw.text(
-            (pill_left + (pill_w - pill_tw) / 2, pill_top + 4),
+            (pill_left + (pill_w - pill_tw) / 2, pill_top + (pill_h - pill_th) / 2 - pill_bb[1]),
             pill_text,
             font=pill_font,
-            fill=(255, 255, 255, 255),
+            fill=pill_text_fill,
         )
 
         draw_lines(
             draw,
-            pill_left + pill_w + 10,
-            current_top + 13,
+            pill_left + pill_w + px(10),
+            current_top + px(13),
             layout["headline_lines"],
             layout["headline_font"],
             pal["warning_text"],
@@ -921,7 +962,7 @@ def draw_warning_strip(
             layout["headline_spacing"],
         )
 
-        meta_y = current_top + 12 + layout["header_h"] + 8
+        meta_y = current_top + px(12) + layout["header_h"] + px(8)
         draw_lines(
             draw,
             pill_left,
@@ -932,12 +973,12 @@ def draw_warning_strip(
             layout["meta_line_h"],
             layout["meta_spacing"],
         )
-        current_top += layout["card_h"] + _WARNING_CARD_GAP
+        current_top += layout["card_h"] + px(_WARNING_CARD_GAP)
 
     remaining = len(warnings) - len(layouts)
     if remaining > 0:
         hint = f"+{remaining} weitere Warnung" if remaining == 1 else f"+{remaining} weitere Warnungen"
-        draw.text((card_left + 2, bottom - 22), hint, font=small_font, fill=pal["warning_meta"])
+        draw.text((card_left + 2, current_top - px(_WARNING_CARD_GAP) + px(4)), hint, font=small_font, fill=pal["warning_meta"])
 
 
 # ---------------------------------------------------------------------------
@@ -980,9 +1021,9 @@ def _draw_hatched_polygon(img: Image.Image, points, color, spacing: int = 9, wid
     if w <= 0 or h <= 0:
         return
     mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).polygon([(x - x0, y - y0) for x, y in points], fill=255)
+    new_draw(mask).polygon([(x - x0, y - y0) for x, y in points], fill=255)
     hatch = Image.new("L", (w, h), 0)
-    hd = ImageDraw.Draw(hatch)
+    hd = new_draw(hatch)
     for d in range(-h, w + h, max(3, spacing)):
         hd.line((d, h, d + h, 0), fill=255, width=max(1, width))
     layer = Image.new("RGBA", (w, h), (*color[:3], 255))
@@ -1210,7 +1251,7 @@ def draw_compact_forecast_strip(img, bounds, forecast_days, day_font, temp_font,
             outline=pal["fc_glass_outline"],
             blur_radius=10,
         )
-        draw = ImageDraw.Draw(img, "RGBA")
+        draw = new_draw(img, "RGBA")
         pad = px(12)
 
         draw_weather_icon(draw, card_right - px(38), top + px(8), day.get("icon_code"),
@@ -1255,8 +1296,7 @@ def draw_compact_forecast_strip(img, bounds, forecast_days, day_font, temp_font,
 
             # UV-Index
             if show_uv and uv_y is not None:
-                uv_rgb  = uv_level_color(uvi)
-                uv_rgba = (*uv_rgb, 230)
+                uv_rgba = _uv_icon_color(uvi) if pal.get("flat") else (*uv_level_color(uvi), 230)
                 uv_lbl  = uv_level_label(uvi)
                 uv_val  = f"{uvi:.0f}" if uvi is not None else "--"
                 uv_str  = f"{uv_val}  {uv_lbl}"
@@ -1269,6 +1309,17 @@ def draw_compact_forecast_strip(img, bounds, forecast_days, day_font, temp_font,
                 else:
                     draw.text((card_left + pad, uv_y + 1), uv_str,
                               font=meta_font, fill=uv_rgba)
+
+
+def _uv_icon_color(uvi: float | None) -> tuple[int, int, int, int]:
+    """UV-Stufe in Panelfarben: ohne Wert schwarz, gering grün, mittel gelb, ab hoch rot."""
+    if uvi is None:
+        return _spectra("black")
+    if uvi <= 2:
+        return _spectra("green")
+    if uvi <= 5:
+        return _spectra("yellow")
+    return _spectra("red")
 
 
 # ---------------------------------------------------------------------------
@@ -1433,7 +1484,12 @@ def _pollen_dot(draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int, value: floa
     if flat and (value is None or value == 0.0):
         draw.ellipse(box, fill=(*SPECTRA6_COLORS["white"], 255), outline=(*SPECTRA6_COLORS["black"], 255), width=2)
     else:
-        draw.ellipse(box, fill=(*color, alpha))
+        draw.ellipse(box, fill=(*color, 255 if flat else alpha))
+
+
+def _soft(pal: dict, color: tuple, alpha: int) -> tuple:
+    """Zurückgenommene Farbe – flach (E-Ink) deckend, sonst mit alpha. Halbtransparentes Schwarz wäre Grau, und Grau dithert."""
+    return (*color[:3], 255 if pal.get("flat") else alpha)
 
 
 def _pollen_value_color(value: float | None, pal: dict) -> tuple:
@@ -1476,7 +1532,7 @@ def draw_pollen_strip(img: Image.Image, bounds: tuple,
                       tint=pal["pollen_glass_tint"],
                       outline=pal["pollen_glass_outline"],
                       blur_radius=8)
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
     pad_h = px(_POLLEN_PAD_H)
     active   = {a: d for a, d in allergens.items() if _allergen_has_load(d)}
@@ -1512,7 +1568,7 @@ def draw_pollen_strip(img: Image.Image, bounds: tuple,
             draw.text((lx, title_mid - (bb[3] - bb[1]) // 2), lbl, font=small_font, fill=pal["pollen_title"])
             lx -= leg_d + px(5)
             draw.ellipse([(lx, title_mid - leg_d // 2), (lx + leg_d, title_mid + leg_d // 2)],
-                         fill=(*pal["pollen_title"][:3], 170))
+                         fill=_soft(pal, pal["pollen_title"], 170))
             lx -= leg_gap
     else:
         # Chips: rechts steht, welche Allergene ohne Flug keinen Platz mehr hatten
@@ -1523,7 +1579,7 @@ def draw_pollen_strip(img: Image.Image, bounds: tuple,
             if draw.textlength(note, font=small_font) > max_w:
                 note = f"{len(dropped)} ohne Flug"
             draw.text((right - pad_h - draw.textlength(note, font=small_font), title_y + px(8)),
-                      note, font=small_font, fill=(*pal["pollen_label"][:3], 180))
+                      note, font=small_font, fill=_soft(pal, pal["pollen_label"], 180))
 
     # ── Chips ─────────────────────────────────────────────────────────────
     if mode == "chips":
@@ -1551,7 +1607,7 @@ def draw_pollen_strip(img: Image.Image, bounds: tuple,
                 tx = cx + big_r + px(8)
                 bb = draw.textbbox((0, 0), name, font=label_font)
                 draw.text((tx, mid - (bb[3] - bb[1]) // 2 - bb[1]), name, font=label_font,
-                          fill=pal["pollen_label"] if is_active else (*pal["pollen_label"][:3], 170))
+                          fill=pal["pollen_label"] if is_active else _soft(pal, pal["pollen_label"], 170))
                 tx += name_w + px(8)
                 bb = draw.textbbox((0, 0), value_label, font=small_font)
                 draw.text((tx, mid - (bb[3] - bb[1]) // 2 - bb[1]), value_label, font=small_font,
@@ -1611,7 +1667,7 @@ def draw_pollen_strip(img: Image.Image, bounds: tuple,
         rows_used = (n + cols - 1) // cols
         hint_y = data_top + rows_used * row_h + max(0, rows_used - 1) * row_gap + row_gap
         draw.text((left + pad_h, hint_y), f"Kein Pollenflug: {', '.join(inactive)}",
-                  font=small_font, fill=(*pal["pollen_label"][:3], 160))
+                  font=small_font, fill=_soft(pal, pal["pollen_label"], 160))
 
 
 # ---------------------------------------------------------------------------
@@ -1640,7 +1696,7 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
         img = create_weather_background_light(rw, rh).convert("RGBA")
     else:
         img = create_weather_background(rw, rh).convert("RGBA")
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
     # Schriften
     font_idle          = context.load_font(px(32), False)
@@ -1677,7 +1733,7 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
     apply_glass_panel(img, (panel_left, panel_top, panel_right, panel_bottom),
                       radius=px(34), tint=pal["panel_tint"], outline=pal["panel_outline"],
                       blur_radius=0)
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
     # Zone 1: Aktuelles Wetter
     cur_top   = panel_top + px(20)
@@ -1742,8 +1798,15 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
     # Zone 2: Amtliche Warnungen (optional)
     warning_items = data.get("warnings") or []
     warning_gap = px(10)
-    warning_h = warning_strip_height(warning_items, cur_right - cur_left - 28, context.load_font)
     stat_top = cur_bottom + px(20)
+    warning_card_w = cur_right - cur_left - px(28)
+    # Höhenbudget: Stat-Panels, Pollenleiste (mind. eine Zeile), Stundenverlauf (mind. 200)
+    # und Tagesvorschau (110) behalten ihren Platz – sonst lieber eine Karte und „+1 weitere“
+    pollen_reserve = px(110) + px(10) if data.get("pollen") else 0
+    warning_budget = ((panel_bottom - px(14)) - stat_top - warning_gap - px(110) - px(14)
+                      - pollen_reserve - px(200) - px(10) - px(110))
+    warning_limit = warning_card_limit(warning_items, warning_card_w, context.load_font, s, warning_budget)
+    warning_h = warning_strip_height(warning_items, warning_card_w, context.load_font, s, warning_limit)
     if warning_h > 0:
         warning_top = stat_top
         draw_warning_strip(
@@ -1754,6 +1817,8 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
             font_micro,
             pal,
             context.load_font,
+            scale=s,
+            limit=warning_limit,
         )
         stat_top = warning_top + warning_h + warning_gap
 
@@ -1809,7 +1874,7 @@ def render_dwd_weather_module(context: ModuleRenderServices, content: object) ->
             pollen_data, font_pollen_title, font_pollen_label, font_pollen_small, pal,
             plan=pollen_plan, scale=s,
         )
-        draw = ImageDraw.Draw(img, "RGBA")
+        draw = new_draw(img, "RGBA")
         zone3_top = pollen_top + pollen_h + pollen_gap
     else:
         zone3_top = next_zone_top
@@ -1866,7 +1931,7 @@ def render_dwd_weather_tile(context: ModuleRenderServices, content: object,
         img = create_weather_background_light(width, height).convert("RGBA")
     else:
         img = create_weather_background(width, height).convert("RGBA")
-    draw = ImageDraw.Draw(img, "RGBA")
+    draw = new_draw(img, "RGBA")
 
     font_title     = context.load_font(px(26), True)
     font_big       = context.load_font(px(84), True)
@@ -1918,7 +1983,7 @@ def render_dwd_weather_tile(context: ModuleRenderServices, content: object,
         for idx, (title, value, icon_name) in enumerate(stat_defs):
             sx = left + idx * (stat_w + gap)
             draw_stat_panel(img, (sx, y, sx + stat_w, y + stat_h), title, value, icon_name,
-                            font_label, font_value, pal, load_font=context.load_font)
+                            font_label, font_value, pal, load_font=context.load_font, scale=s)
         y += stat_h + px(14)
 
     # Vorschau, wenn noch Platz (140: Tag, Temperatur und drei Meta-Zeilen ohne Überlappung)
@@ -1926,7 +1991,7 @@ def render_dwd_weather_tile(context: ModuleRenderServices, content: object,
     fc_h = px(140)
     if forecast_days and height - y >= fc_h + px(8):
         draw_compact_forecast_strip(img, (left, y, right, y + fc_h), forecast_days,
-                                    font_fc_day, font_fc_temp, font_fc_meta, pal)
+                                    font_fc_day, font_fc_temp, font_fc_meta, pal, scale=s)
         y += fc_h + px(12)
 
     # Pollen, wenn danach noch Platz ist (kompakt als Chips, Raster nur bei viel Höhe)
