@@ -38,6 +38,21 @@ python -c "from app.server import app; [app.jinja_env.get_template(name) for nam
 - If behavior changes are user-facing, add a short note to `CHANGELOG.md`.
 - `app/requirements.txt` pins every package, including the indirect ones, so each build gets the same versions. To update: install the direct packages (top block) into a fresh virtual environment, run the tests, and copy the result of `pip freeze` into the second block.
 
+## Releasing
+
+Every change that reaches users gets a version (`MAJOR.MINOR.PATCH`, still `0.x`):
+
+- new features or changed behaviour → next minor version (`0.3.0` → `0.4.0`)
+- only fixes → next patch version (`0.3.0` → `0.3.1`)
+
+Steps:
+
+1. `APP_VERSION` in `app/config.py`
+2. In `CHANGELOG.md`, turn the collected `## [Unreleased]` entries into `## [x.y.z] - YYYY-MM-DD` and keep an empty `## [Unreleased]` above
+3. Commit, then tag and push: `git tag -a vX.Y.Z -m "Inkwall X.Y.Z"` and `git push origin main vX.Y.Z`
+
+The tag starts *Docker Publish*: CI first, then the images `X.Y.Z`, `X.Y` and `latest`. The firmware has its own version (`FIRMWARE_VERSION` in `esp32/Inkwall/Inkwall.ino`).
+
 ## Reporting Issues
 
 When filing a bug report, include:

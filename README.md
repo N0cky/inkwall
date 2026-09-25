@@ -191,8 +191,8 @@ For local development, `python app/server.py` remains the simplest path. In Dock
 
 The recommended way to use this project on Unraid is the published container image from the GitHub Container Registry:
 
-- `ghcr.io/n0cky/inkwall:latest` – the current state of `main`
-- `ghcr.io/n0cky/inkwall:0.2.0` (and `0.2`) – released versions, from Git tags like `v0.2.0`
+- `ghcr.io/n0cky/inkwall:latest` – the newest release
+- `ghcr.io/n0cky/inkwall:0.3.0` (and `0.3`) – a fixed version, from Git tags like `v0.3.0`; see `CHANGELOG.md` for what changed
 
 Images are built for `linux/amd64` and `linux/arm64`, and only after the tests and a trial start of the container have passed.
 

@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-26
+
 ### Added
 
 - New web interface in four areas: **Anzeige** (live image, the programme with one switch per content, drag-and-drop order, tile heights, previews, night plan), **Inhalte** (one card per source, save per card, errors at the field, connection test), **Gerät** (display settings with theme previews, ESP32 status), **System** (events view, time zone, backup and restore, module reload)
