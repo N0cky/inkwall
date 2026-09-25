@@ -26,7 +26,7 @@ from dotenv import dotenv_values
 from PIL import ImageFont
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Verzeichnisse
@@ -84,6 +84,16 @@ DISPLAY_ROTATION_ALIASES = {
 # Framework-Settings-Felder
 # Modulspezifische Felder liegen in modules/*/SETTINGS_FIELDS.
 # ---------------------------------------------------------------------------
+
+# Bundesländer für Feiertage und Schulferien (ISO 3166-2, wie openholidaysapi.org sie erwartet)
+HOLIDAY_REGIONS = (
+    ("", "Aus"),
+    ("DE-BW", "Baden-Württemberg"), ("DE-BY", "Bayern"), ("DE-BE", "Berlin"), ("DE-BB", "Brandenburg"),
+    ("DE-HB", "Bremen"), ("DE-HH", "Hamburg"), ("DE-HE", "Hessen"), ("DE-MV", "Mecklenburg-Vorpommern"),
+    ("DE-NI", "Niedersachsen"), ("DE-NW", "Nordrhein-Westfalen"), ("DE-RP", "Rheinland-Pfalz"),
+    ("DE-SL", "Saarland"), ("DE-SN", "Sachsen"), ("DE-ST", "Sachsen-Anhalt"), ("DE-SH", "Schleswig-Holstein"),
+    ("DE-TH", "Thüringen"),
+)
 
 SETTINGS_FIELDS: list[dict] = [
     # ── Render-Grundeinstellungen ────────────────────────────────────────────
@@ -283,6 +293,22 @@ SETTINGS_FIELDS: list[dict] = [
         "link_href":   "https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
         "link_label":  "Liste aller Zeitzonen",
     },
+    {
+        "name":    "HOLIDAY_REGION",
+        "label":   "Feiertage und Schulferien",
+        "type":    "select",
+        "section": "framework",
+        "wide":    False,
+        "default": "",
+        "options": list(HOLIDAY_REGIONS),
+        "help":    (
+            "Bundesland für Feiertage und Schulferien (openholidaysapi.org): der Kalender zeigt sie an, "
+            "die Müllabfuhr nennt den Feiertag bei verschobenen Terminen, und Zeitfenster können nur in "
+            "den Ferien oder nur außerhalb gelten."
+        ),
+        "link_href":  "https://www.openholidaysapi.org",
+        "link_label": "OpenHolidays API",
+    },
     # ── Idle-Verwaltung ──────────────────────────────────────────────────────
     {
         "name":    "IDLE_MODULES",
@@ -449,8 +475,8 @@ SETTINGS_GROUPS: list[dict] = [
     },
     {
         "title":  "Lokalisierung",
-        "desc":   "Zeitzone für Uhrzeiten und lokale Daten.",
-        "fields": ["TIMEZONE"],
+        "desc":   "Zeitzone für Uhrzeiten und lokale Daten, Bundesland für Feiertage und Ferien.",
+        "fields": ["TIMEZONE", "HOLIDAY_REGION"],
     },
     {
         "title":  "Idle-Verwaltung",

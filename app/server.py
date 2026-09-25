@@ -237,7 +237,8 @@ def _get_schedule_state(now_local: datetime | None = None) -> dict:
         return {"active": False, "window": None, "seconds_until_end": 0, "seconds_until_change": 0,
                 "label": "", "name": "", "next": None}
     now_local = now_local or _get_local_now()
-    active, seconds, upcoming = schedule.active_window(windows, now_local)
+    from app.holidays import school_holiday_checker
+    active, seconds, upcoming = schedule.active_window(windows, now_local, school_holiday_checker(windows))
     return {
         "active":               active is not None,
         "window":               active,
@@ -544,8 +545,21 @@ def _save_image(image: Image.Image, state_key: str, module_id: str) -> None:
     global _esp32_state
     cfg = get_cfg()
 
-    # Optional: Uhrzeit auf jeder Seite (das Dashboard hat sie selbst)
+    # Optional: Uhrzeit auf jeder Seite (das Dashboard hat sie selbst). Der Stempel
+    # allein ist keine Änderung: verglichen wird das Bild ohne ihn – sonst zeichnet
+    # das Panel bei jedem Render neu, nur weil die Uhr weiterläuft. Ist der Inhalt
+    # gleich, bleibt das gestempelte Bild samt seiner Uhrzeit (= letzte echte Änderung).
+    content_hash = ""
     if getattr(cfg, "show_render_time", False) and module_id != "dashboard":
+        content_hash = hashlib.md5(
+            image.tobytes() + f"|{image.size}|{image.mode}|{cfg.output_format}|{cfg.display_rotation}".encode()
+        ).hexdigest()
+        paths = [CURRENT_IMAGE_PATH] + ([CURRENT_BMP_PATH, CURRENT_EPD_PATH] if cfg.output_format == "bmp" else [])
+        if content_hash == _esp32_state.get("content_hash") and all(p.exists() for p in paths):
+            _atomic_write_bytes(STATE_PATH, state_key.encode("utf-8"))
+            _esp32_state = {**_esp32_state, "state": state_key, "media_type": module_id}
+            log.debug(f"Rendered [{module_id}] state={state_key[:40]} – Inhalt unverändert, Bild mit Stempel bleibt")
+            return
         from app.image_rendering import stamp_render_time
         image = stamp_render_time(image, cfg.display_theme, f"Stand {_get_local_now():%H:%M}")
 
@@ -585,6 +599,7 @@ def _save_image(image: Image.Image, state_key: str, module_id: str) -> None:
         "state":       state_key,
         "media_type":  module_id,
         "rendered_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "content_hash": content_hash,
     }
     log.log(
         logging.DEBUG if unchanged else logging.INFO,
@@ -879,6 +894,20 @@ def _stale_sources(env: dict[str, str]) -> list:
     return stale
 
 
+def _active_alerts(env: dict[str, str]) -> list[dict]:
+    """Gültige Warnungen aller eingeschalteten Inhalte (Unwetter, NINA) – nur aus dem Cache."""
+    from app.http_client import cache_only
+    alerts: list[dict] = []
+    with cache_only():
+        for mod in _registry.get_modules():
+            try:
+                if mod.is_enabled(env):
+                    alerts.extend(a for a in (mod.get_alerts(env) or []) if isinstance(a, dict))
+            except Exception as exc:
+                log.debug(f"get_alerts [{mod.MODULE_ID}]: {exc}")
+    return alerts
+
+
 def _current_summary() -> dict:
     mod = _registry.get_module_by_id(str(_esp32_state.get("media_type", "")))
     media = str(_esp32_state.get("media_type", ""))
@@ -896,6 +925,8 @@ _NOTIFY_LOG = {
     "source_up": ("Quelle wieder erreichbar – Nachricht verschickt", logging.INFO),
     "daily": ("Tagesbild verschickt", logging.INFO),
     "weekly": ("Wochenbericht verschickt", logging.INFO),
+    "alert": ("Warnung – Nachricht verschickt", logging.WARNING),
+    "alert_end": ("Entwarnung verschickt", logging.INFO),
 }
 
 
@@ -944,6 +975,7 @@ def _check_device_offline() -> None:
         sent = notifier.on_cycle(
             _last_ack, _get_local_now(),
             stale_sources=_stale_sources(env) if "sources" in notifier.events else [],
+            alerts=_active_alerts(env) if "warnings" in notifier.events else None,
             current=_current_summary(),
             weekly_stats=lambda: monitoring.ack_stats(monitoring.read_ack_history(limit=5000, hours=24 * 7),
                                                       _suggest_next_wake(_esp32_state.get("state", "idle"), _esp32_state.get("media_type", "idle"))[0]),

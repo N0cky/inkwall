@@ -28,6 +28,9 @@ DEFAULT_CACHE_SECONDS = 900
 DEFAULT_DAYS_AHEAD = 7
 DEFAULT_MAX_EVENTS = 14
 SOURCE_COLORS = ("blue", "green", "red", "yellow")   # Reihenfolge der Quellen → Farbe
+HOLIDAY_COLOR = "red"                                 # Feiertage und Ferien (Bundesland unter System)
+HOLIDAY_LABEL = "Feiertage und Ferien"
+HOLIDAY_MODES = ("both", "public", "off")
 
 CACHE_FILE = DATA_DIR / "calendar_cache.json"   # letzter guter Stand je Quelle (ICS-Text)
 
@@ -314,9 +317,49 @@ def build_calendar_content(sources: list[tuple], now: datetime,
     }
 
 
+# ---------------------------------------------------------------------------
+# Feiertage und Ferien als zusätzliche Quelle
+# ---------------------------------------------------------------------------
+
+def holiday_mode(env: dict | None = None) -> str:
+    raw = env.get("CALENDAR_HOLIDAYS", "") if env is not None else get_setting("CALENDAR_HOLIDAYS", "")
+    mode = str(raw or "both").strip().lower()
+    return mode if mode in HOLIDAY_MODES else "both"
+
+
+def holidays_active(env: dict | None = None) -> bool:
+    """Bundesland eingestellt und Feiertage im Kalender nicht abgeschaltet."""
+    from app.config import HOLIDAY_REGIONS
+    region = (env.get("HOLIDAY_REGION", "") if env is not None else get_setting("HOLIDAY_REGION", "")).strip().upper()
+    return region in {code for code, _ in HOLIDAY_REGIONS if code} and holiday_mode(env) != "off"
+
+
+def holiday_occurrences(today: date, window_end: date) -> list[dict]:
+    """
+    Feiertage als ganztägige Termine; Ferien als EIN Eintrag am ersten Tag im
+    Fenster („Herbstferien (bis Sa 17.10.)“) statt an jedem Ferientag – sonst
+    verdrängen zwei Wochen Ferien alle anderen Termine.
+    """
+    if not holidays_active():
+        return []
+    from app import holidays
+    from app.config import format_weekday_short
+    out: list[dict] = []
+    for h in holidays.between(holidays.PUBLIC, today, window_end):
+        out.append({"start": h["start"], "end": h["end"] + timedelta(days=1), "all_day": True, "summary": h["name"],
+                    "location": "", "description": "", "uid": f"holiday-{h['start'].isoformat()}"})
+    if holiday_mode() == "both":
+        for h in holidays.between(holidays.SCHOOL, today, window_end):
+            first = max(h["start"], today)
+            summary = f"{h['name']} (bis {format_weekday_short(h['end'])} {h['end']:%d.%m.})"
+            out.append({"start": first, "end": first + timedelta(days=1), "all_day": True, "summary": summary,
+                        "location": "", "description": "", "uid": f"school-{h['start'].isoformat()}"})
+    return out
+
+
 def fetch_calendar_content(force_refresh: bool = False) -> dict | None:
     sources = parse_sources(get_setting("CALENDAR_ICS_URLS", ""))
-    if not sources:
+    if not sources and not holidays_active():
         return None
     days_ahead = get_int_setting("CALENDAR_DAYS_AHEAD", DEFAULT_DAYS_AHEAD, 1, 60)
     max_events = get_int_setting("CALENDAR_MAX_EVENTS", DEFAULT_MAX_EVENTS, 1, 60)
@@ -342,11 +385,17 @@ def fetch_calendar_content(force_refresh: bool = False) -> dict | None:
         # Quelle gerade nicht erreichbar und der Stand ist älter als ein Refresh → „Stand vom …“
         if state["error"] and state["fetched_at"] and time.time() - state["fetched_at"] > cache_seconds:
             oldest_stale = state["fetched_at"] if not oldest_stale else min(oldest_stale, state["fetched_at"])
-    if not sources_events:
-        return None
+    if sources and not sources_events:
+        return None          # kein eigener Kalender ladbar – Feiertage allein wären irreführend
+    holiday_events = holiday_occurrences(today, window_end)
+    if not sources and not holiday_events:
+        return None          # nur Feiertage eingestellt, aber keine im Zeitraum: nichts zu zeigen
+    if holiday_events:
+        sources_events.append((HOLIDAY_LABEL, HOLIDAY_COLOR, holiday_events))
 
     content = build_calendar_content(sources_events, now, days_ahead, max_events, hide_past)
-    counts = dict(zip(loaded_index, content.pop("source_counts", [])))
+    source_counts = content.pop("source_counts", [])
+    counts = dict(zip(loaded_index, source_counts))
     content["sources"] = []
     for i, (label, url) in enumerate(sources):
         state = source_state(url)
@@ -357,6 +406,9 @@ def fetch_calendar_content(force_refresh: bool = False) -> dict | None:
             "loaded": i in counts,
             "error": state["error"],
         })
+    if holiday_events:
+        content["sources"].append({"label": HOLIDAY_LABEL, "color": HOLIDAY_COLOR, "count": source_counts[-1],
+                                   "loaded": True, "error": "", "holidays": True})
     content["source_errors"] = [{"label": s["label"], "error": s["error"]} for s in content["sources"] if s["error"]]
     content["stale_since"] = (
         datetime.fromtimestamp(oldest_stale, tz=now.tzinfo).isoformat() if oldest_stale else ""

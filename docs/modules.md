@@ -197,6 +197,10 @@ Gemeinsame Zeichen-Helfer fuer alle Module:
 - `app/ics.py`: `parse_calendar(text)` und `occurrences(kalender, von, bis)` – ICS-Kalender samt
   Wiederholungen, verschobener/abgesagter Einzeltermine und Zeitzonen (icalendar + recurring-ical-events),
   Termine als dicts in lokaler Zeit; Kalender und Muellabfuhr nutzen ihn
+- `app/holidays.py`: Feiertage und Schulferien des eingestellten Bundeslands (`HOLIDAY_REGION`,
+  openholidaysapi.org, eine Woche gecacht, auf Platte gemerkt): `between(PUBLIC|SCHOOL, von, bis)`,
+  `school_holiday_on(tag)`, `public_holiday_on(tag)`, `shift_reason(tag, feiertage)`; laedt nur, wo
+  `network_allowed()` es erlaubt
 - `app/image_rendering.py`: `resize_to_fit`, `fit_crop`, `create_blurred_cover_background`,
   `create_centered_cover_canvas`, `create_light_cover_canvas`, `create_rounded_thumbnail`,
   `draw_bottom_gradient`, `convert_to_spectra6`
@@ -355,7 +359,19 @@ einen Status-Chip, auf der Inhalte-Seite eine Zusammenfassung und einen Knopf "P
 eingestellten Abendstunde, oder heute bis zur "Erledigt"-Stunde). Dringende Idle-Module werden
 in der Rotation vor jedes andere Modul geschoben (`[Muell, Wetter, Muell, News]`) und im
 Dashboard nach oben sortiert; die Kachelhoehen bleiben. Standard: `False`. Der Hook wird bei
-jedem Render-Durchlauf gefragt und muss deshalb aus dem Cache antworten.
+jedem Render-Durchlauf gefragt und muss deshalb aus dem Cache antworten. Weitere Beispiele: das
+Wetter bei einer Unwetterwarnung (DWD-Stufe 3 oder 4, jetzt oder in den naechsten 3 Stunden), NINA
+bei jeder aktiven Warnung.
+
+### `get_alerts(self, env)`
+
+Gerade gueltige Warnungen fuer die Benachrichtigung „Warnungen“ (`NOTIFY_EVENTS=…,warnings`):
+`[{"id", "title", "text", "source", "severity", "until", "area"}, …]`. Je `id` gibt es genau eine
+Nachricht und eine Entwarnung, sobald die `id` fehlt – die `id` muss deshalb ueber alle
+Aktualisierungen einer Warnung gleich bleiben. `severity`: `"minor"`, `"moderate"`, `"severe"` oder
+`"extreme"` (ab `severe` rot und mit hoher Prioritaet). Laeuft nach jedem Worker-Durchlauf innerhalb
+von `cache_only()` und nur fuer eingeschaltete Inhalte. Standard: `[]`. Das Wetter meldet so seine
+Unwetterwarnungen, NINA seine Warnungen.
 
 Prioritaetsmodule setzen zusaetzlich `ENABLED_KEY` (z. B. `"PLEX_MODULE_ENABLED"`), damit die
 Anzeige-Seite sie ueber denselben Schalter ein- und ausschalten kann wie Idle-Module.
@@ -455,3 +471,4 @@ Empfehlung fuer neue Module:
 - [steam](/C:/Users/tobia/Documents/Inkwall/modules/steam/__init__.py)
 - [dwd_weather](/C:/Users/tobia/Documents/Inkwall/modules/dwd_weather/__init__.py)
 - [tagesschau](/C:/Users/tobia/Documents/Inkwall/modules/tagesschau/__init__.py)
+- [nina](/C:/Users/tobia/Documents/Inkwall/modules/nina/__init__.py) – nur mit aktiver Warnung Inhalt, dann dringend

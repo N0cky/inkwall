@@ -452,6 +452,13 @@ def fetch_dwd_weather(force_refresh: bool = False) -> dict | None:
             return dict(cached) if isinstance(cached, dict) else None
 
 
+def cached_warnings() -> list[dict]:
+    """Warnungen aus dem letzten Abruf, ohne neu zu laden (für „dringend“ und Benachrichtigungen)."""
+    with DWD_WEATHER_LOCK:
+        data = DWD_WEATHER_CACHE.get("data")
+        return [dict(w) for w in ((data or {}).get("warnings") or []) if isinstance(w, dict)]
+
+
 def should_refresh_dwd_weather() -> bool:
     cfg = get_cfg()
     with DWD_WEATHER_LOCK:

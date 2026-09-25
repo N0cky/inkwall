@@ -10,12 +10,13 @@ Ohne passendes Fenster gilt das Programm.
 
 Gespeichert wird alles in SCHEDULE_WINDOWS, ein Fenster je Eintrag:
 
-    Name|Tage|HH:MM-HH:MM|layout|sekunden|inhalte; Name|…
+    Name|Tage|HH:MM-HH:MM|layout|sekunden|inhalte|ferien; Name|…
 
     Tage:     * (täglich), Mo-Fr, Sa,So, Mo,Mi,Fr, Mo-Do,So
     layout:   rotation, dashboard oder leer (wie im Programm)
     sekunden: Takt in Sekunden oder leer (wie im Programm)
     inhalte:  modul:höhe,modul,… oder leer (alle Inhalte des Programms)
+    ferien:   ferien (nur in den Schulferien), schule (nur außerhalb) oder leer/fehlend (immer)
 
 Der alte Nachtmodus (NIGHT_MODE_*) wird als ein Fenster „Nachts“ abgebildet,
 solange kein Zeitplan gespeichert ist – so bleibt eine bestehende
@@ -35,6 +36,7 @@ LAYOUTS = ("", "rotation", "dashboard")
 MIN_INTERVAL_SECONDS = 30
 MAX_INTERVAL_SECONDS = 24 * 3600
 MAX_WINDOWS = 12
+SCHOOL_MODES = ("", "ferien", "schule")     # immer, nur in den Schulferien, nur außerhalb
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
@@ -47,6 +49,7 @@ class Window:
     layout: str = ""                    # "" = wie im Programm
     interval_seconds: int = 0           # 0 = wie im Programm
     content: tuple = field(default_factory=tuple)   # ((modul, prozent), …), leer = alle Inhalte des Programms
+    school: str = ""                    # SCHOOL_MODES: "" immer, "ferien" nur in den Schulferien, "schule" nur außerhalb
 
     @property
     def start_text(self) -> str:
@@ -73,6 +76,7 @@ class Window:
             "layout": self.layout,
             "interval_seconds": self.interval_seconds,
             "content": [{"id": mid, "height": pct or None} for mid, pct in self.content],
+            "school": self.school,
             "days_text": describe_days(self.days),
         }
 
@@ -186,8 +190,9 @@ def parse_windows(raw: str) -> list[Window]:
         if not chunk:
             continue
         parts = [p.strip() for p in chunk.split("|")]
-        parts += [""] * (6 - len(parts))
-        name, days_text, span, layout, seconds_text, content_text = parts[:6]
+        parts += [""] * (7 - len(parts))
+        name, days_text, span, layout, seconds_text, content_text, school = parts[:7]
+        school = school.lower() if school.lower() in SCHOOL_MODES else ""
         days = parse_days(days_text)
         if days is None or "-" not in span:
             continue
@@ -206,7 +211,7 @@ def parse_windows(raw: str) -> list[Window]:
         windows.append(Window(
             name=_clean_name(name) or f"Fenster {len(windows) + 1}",
             days=days, start=start, end=end, layout=layout,
-            interval_seconds=seconds, content=_parse_content(content_text),
+            interval_seconds=seconds, content=_parse_content(content_text), school=school,
         ))
     return windows[:MAX_WINDOWS]
 
@@ -215,10 +220,13 @@ def serialize_windows(windows: list[Window]) -> str:
     chunks: list[str] = []
     for w in windows:
         content = ",".join(f"{mid}:{pct}" if pct else mid for mid, pct in w.content)
-        chunks.append("|".join([
+        parts = [
             _clean_name(w.name), _days_to_storage(w.days), f"{w.start_text}-{w.end_text}",
             w.layout, str(w.interval_seconds) if w.interval_seconds else "", content,
-        ]))
+        ]
+        if w.school:                    # 7. Teil nur, wenn gesetzt: ältere Stände bleiben unverändert
+            parts.append(w.school)
+        chunks.append("|".join(parts))
     return "; ".join(chunks)
 
 
@@ -258,6 +266,7 @@ def window_from_dict(data: dict, index: int = 0) -> Window:
         layout=layout,
         interval_seconds=seconds,
         content=tuple(content),
+        school=str(data.get("school", "") or "").strip().lower(),
     )
 
 
@@ -280,6 +289,8 @@ def validate_windows(windows: list[Window], known_module_ids=None) -> list[str]:
             errors.append(f"{who}: Takt zwischen {MIN_INTERVAL_SECONDS} s und 24 h wählen.")
         if w.interval_seconds < 0:
             errors.append(f"{who}: Takt muss eine Zahl in Sekunden sein.")
+        if w.school not in SCHOOL_MODES:
+            errors.append(f"{who}: Unbekannte Ferien-Einstellung.")
         if known_module_ids is not None:
             unknown = [mid for mid in w.module_ids if mid not in known_module_ids]
             if unknown:
@@ -308,16 +319,24 @@ def validate_raw(raw: str) -> list[str]:
 # Auswertung
 # ---------------------------------------------------------------------------
 
-def _window_active_at(w: Window, now: datetime) -> bool:
+def _school_ok(w: Window, day, is_school_holiday) -> bool:
+    """Ferien-Bedingung am Tag, an dem das Fenster beginnt. Ohne Ferien-Daten gilt: keine Ferien."""
+    if not w.school:
+        return True
+    holiday = bool(is_school_holiday(day)) if is_school_holiday else False
+    return holiday if w.school == "ferien" else not holiday
+
+
+def _window_active_at(w: Window, now: datetime, is_school_holiday=None) -> bool:
     cur = now.hour * 60 + now.minute
     weekday = now.weekday()
     if w.start < w.end:
-        return weekday in w.days and w.start <= cur < w.end
-    # Über Mitternacht: der Wochentag ist der Tag, an dem das Fenster beginnt
+        return weekday in w.days and w.start <= cur < w.end and _school_ok(w, now.date(), is_school_holiday)
+    # Über Mitternacht: der Wochentag (und der Ferientag) ist der Tag, an dem das Fenster beginnt
     if cur >= w.start:
-        return weekday in w.days
+        return weekday in w.days and _school_ok(w, now.date(), is_school_holiday)
     if cur < w.end:
-        return (weekday - 1) % 7 in w.days
+        return (weekday - 1) % 7 in w.days and _school_ok(w, now.date() - timedelta(days=1), is_school_holiday)
     return False
 
 
@@ -343,12 +362,12 @@ def _end_datetime(w: Window, now: datetime) -> datetime:
     return end
 
 
-def _next_start(w: Window, now: datetime) -> datetime | None:
+def _next_start(w: Window, now: datetime, is_school_holiday=None) -> datetime | None:
     """Nächster Beginn des Fensters ab jetzt (bis zu 8 Tage voraus)."""
     base = now.replace(second=0, microsecond=0, fold=0)
     for offset in range(0, 8):
         day = base + timedelta(days=offset)
-        if day.weekday() not in w.days:
+        if day.weekday() not in w.days or not _school_ok(w, day.date(), is_school_holiday):
             continue
         start = _after(day.replace(hour=w.start // 60, minute=w.start % 60), now)
         if start is not None:
@@ -356,13 +375,15 @@ def _next_start(w: Window, now: datetime) -> datetime | None:
     return None
 
 
-def active_window(windows: list[Window], now: datetime) -> tuple[Window | None, int, Window | None]:
+def active_window(windows: list[Window], now: datetime, is_school_holiday=None) -> tuple[Window | None, int, Window | None]:
     """
     (aktives Fenster oder None, Sekunden bis zur nächsten Änderung, nächstes beginnendes Fenster).
     Änderung = Ende des aktiven Fensters oder Beginn irgendeines Fensters, was
     zuerst kommt. 0 Sekunden = keine Änderung absehbar.
+    is_school_holiday(date) → bool: für Fenster mit Ferien-Bedingung (app.holidays);
+    ohne Prüfung gilt jeder Tag als Schultag.
     """
-    active = next((w for w in windows if _window_active_at(w, now)), None)
+    active = next((w for w in windows if _window_active_at(w, now, is_school_holiday)), None)
     candidates: list[tuple[datetime, Window | None]] = []
     if active is not None:
         end = _after(_end_datetime(active, now), now)
@@ -371,7 +392,7 @@ def active_window(windows: list[Window], now: datetime) -> tuple[Window | None, 
     for w in windows:
         if w is active:
             continue
-        start = _next_start(w, now)
+        start = _next_start(w, now, is_school_holiday)
         if start is not None:
             candidates.append((start, w))
     if not candidates:
@@ -419,4 +440,6 @@ def describe_window(w: Window, module_names: dict | None = None) -> str:
     if w.interval_seconds:
         s = w.interval_seconds
         parts.append("alle " + (f"{s // 3600} h" if s % 3600 == 0 else f"{s // 60} min" if s % 60 == 0 else f"{s} s"))
+    if w.school:
+        parts.append("nur in den Schulferien" if w.school == "ferien" else "nur außerhalb der Schulferien")
     return " · ".join(parts)

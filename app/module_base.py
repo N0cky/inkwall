@@ -200,6 +200,17 @@ class InkwallModule(ABC):
         """
         return False
 
+    def get_alerts(self, env: dict[str, str]) -> list[dict]:
+        """
+        Gerade gültige Warnungen für die Benachrichtigung „Warnungen“:
+        [{"id", "title", "text", "source", "severity", "until"}, …]. id bleibt
+        über die Lebensdauer einer Warnung gleich (Aktualisierungen eingeschlossen),
+        damit je Warnung genau eine Nachricht und eine Entwarnung kommt.
+        severity: "minor", "moderate", "severe" oder "extreme". Nur aus dem
+        Cache antworten – läuft nach jedem Worker-Durchlauf. Standard: keine.
+        """
+        return []
+
     def supports_tile(self) -> bool:
         """True, wenn das Modul render_tile() überschreibt (Dashboard-Kachel)."""
         return type(self).render_tile is not InkwallModule.render_tile

@@ -257,6 +257,7 @@ def _group_events(events: list[dict], with_labels: bool = True) -> list[dict]:
                     g["labels"].append(ev["label"])
                 if ev.get("shifted_from") and not g["shifted_from"]:
                     g["shifted_from"] = ev["shifted_from"]
+                    g["shifted_reason"] = ev.get("shifted_reason", "")
                 break
         else:
             groups.append({
@@ -265,6 +266,7 @@ def _group_events(events: list[dict], with_labels: bool = True) -> list[dict]:
                 "icon": ev.get("icon", "bin"),
                 "labels": [ev["label"]] if with_labels and ev.get("label") else [],
                 "shifted_from": ev.get("shifted_from", ""),
+                "shifted_reason": ev.get("shifted_reason", ""),
             })
     return groups
 
@@ -274,7 +276,9 @@ def _group_note(g: dict) -> str:
     if g["labels"]:
         parts.append(", ".join(g["labels"]))
     if g.get("shifted_from"):
-        parts.append(f"verschoben, sonst {g['shifted_from']}")
+        # „wegen Pfingstmontag verschoben“, sobald das Bundesland für Feiertage eingestellt ist
+        reason = f"wegen {g['shifted_reason']} " if g.get("shifted_reason") else ""
+        parts.append(f"{reason}verschoben, sonst {g['shifted_from']}")
     return " · ".join(parts)
 
 

@@ -10,6 +10,7 @@ Pollenflug basierend auf Daten des Deutschen Wetterdienstes (DWD).
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from PIL import Image
@@ -19,6 +20,28 @@ from app.module_services import ModuleRenderServices
 from app.logger import get_logger
 
 log = get_logger(__name__)
+
+# Ab dieser DWD-Stufe (3 = Unwetter, 4 = extremes Unwetter) springt das Wetter nach vorn
+URGENT_LEVEL = 3
+# Auch eine Unwetterwarnung, die erst in dieser Zeit beginnt, zählt schon
+URGENT_LOOKAHEAD_SECONDS = 3 * 3600
+
+
+def severe_warnings(now_ms: float | None = None) -> list[dict]:
+    """Unwetterwarnungen (ab URGENT_LEVEL), die gelten oder bald beginnen – nur aus dem Cache."""
+    from .dwd import cached_warnings
+    now_ms = time.time() * 1000 if now_ms is None else now_ms
+    found: list[dict] = []
+    for warning in cached_warnings():
+        if (warning.get("level") or 0) < URGENT_LEVEL:
+            continue
+        start, end = warning.get("_start_ms"), warning.get("_end_ms")
+        if isinstance(end, (int, float)) and end <= now_ms:
+            continue
+        if isinstance(start, (int, float)) and start > now_ms + URGENT_LOOKAHEAD_SECONDS * 1000:
+            continue
+        found.append(warning)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +253,25 @@ class DWDWeatherModule(InkwallModule):
     def should_refresh(self, env: dict[str, str]) -> bool:
         from .renderer import should_refresh_dwd_weather_module
         return should_refresh_dwd_weather_module()
+
+    def is_urgent(self, env: dict[str, str]) -> bool:
+        """Unwetter (DWD-Stufe 3 oder 4) jetzt oder in den nächsten 3 Stunden."""
+        return bool(severe_warnings())
+
+    def get_alerts(self, env: dict[str, str]) -> list[dict]:
+        alerts = []
+        for w in severe_warnings():
+            level = w.get("level") or 0
+            alerts.append({
+                # Über alle Aktualisierungen gleich: Ereignis + Beginn (warnId wechselt nicht, fehlt aber manchmal)
+                "id": f"dwd:{w.get('warn_id') or w.get('event') or w.get('headline')}:{w.get('_start_ms')}",
+                "title": w.get("headline") or w.get("event") or "Unwetterwarnung",
+                "text": w.get("description") or "",
+                "source": "Deutscher Wetterdienst",
+                "severity": "extreme" if level >= 4 else "severe",
+                "until": w.get("end") or "",
+            })
+        return alerts
 
     def get_state_key(self, content: Any) -> str:
         # Eindeutig über Station-ID; should_refresh() löst den Neu-Render aus

@@ -6,6 +6,20 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-26
+
+### Added
+
+- **Warnungen (NINA)**: civil protection warnings for your district from warnung.bund.de – disaster control (MoWaS, Katwarn, BIWAPP), floods, police, warning day. Enter a town (`NINA_REGION`, e.g. `Wetzlar`) or a regional key; the module finds the district through the official municipality list. Without an active warning the content is empty and does not appear; with one it is urgent and comes first in the rotation and on top of the dashboard. Weather warnings stay with the DWD weather. Severity filter (`NINA_MIN_SEVERITY`), refresh (`NINA_CACHE_SECONDS`), "Verbindung prüfen" shows the district found and the active warnings
+- Severe weather is urgent: a DWD warning of level 3 (Unwetter) or 4, active now or starting within 3 hours, moves the weather to the front like the garbage reminder
+- Notification event `warnings`: one message per new NINA warning or severe weather warning (red and high priority from "severe"), with area, source and end, and an all-clear when it no longer applies; updates of a warning do not send a new message
+- Public holidays and school holidays per federal state (`HOLIDAY_REGION`, System page, openholidaysapi.org, cached for a week and kept on disk): the calendar shows them as their own source (`CALENDAR_HOLIDAYS`: both, public, off) – school holidays once with their end ("Herbstferien (bis Sa 17.10.)") instead of on every day – and also works without an ICS calendar; the Müllabfuhr names the holiday behind a shifted collection ("wegen Pfingstmontag verschoben, sonst Montag"); schedule windows can apply only during or only outside school holidays (7th part of `SCHEDULE_WINDOWS`, select in the window editor)
+- Module hook `get_alerts()` for warnings that should be sent as notifications
+
+### Fixed
+
+- "Uhrzeit auf jeder Seite" (`SHOW_RENDER_TIME`): the stamp alone made every render a new image, so the panel refreshed whenever the clock moved on; the image is now compared without the stamp, and the stamp shows the time of the last real change
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

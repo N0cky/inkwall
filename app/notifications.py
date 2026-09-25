@@ -49,16 +49,19 @@ EVENT_OPTIONS = (
     ("sources",  f"Quelle länger als {SOURCE_STALE_HOURS} h nicht erreichbar"),
     ("daily",    "Tagesbild am Morgen"),
     ("weekly",   "Wochenbericht montags"),
+    ("warnings", "Warnungen: Unwetter ab Stufe 3 und NINA, mit Entwarnung"),
 )
 DEFAULT_EVENTS = "offline,firmware"
 
 COLORS = {
     "offline": 0xE5484D, "online": 0x30A46C, "firmware": 0x3B82F6, "rollback": 0xF59E0B, "errors": 0xF59E0B,
     "source_down": 0xF59E0B, "source_up": 0x30A46C, "daily": 0x8B5CF6, "weekly": 0x0EA5E9, "test": 0x14B8A6,
+    "alert": 0xE5484D, "alert_info": 0xF59E0B, "alert_end": 0x30A46C,
 }
 TAGS = {
     "offline": "warning", "online": "white_check_mark", "firmware": "arrow_up", "rollback": "rewind", "errors": "x",
     "source_down": "cloud", "source_up": "white_check_mark", "daily": "sunrise", "weekly": "bar_chart", "test": "bell",
+    "alert": "rotating_light", "alert_info": "warning", "alert_end": "white_check_mark",
 }
 
 
@@ -382,18 +385,19 @@ class Notifier:
 
     # ── Worker-Durchlauf ────────────────────────────────────────────────────
     def on_cycle(self, last_ack: dict, now_local: datetime, stale_sources: list[tuple[str, str, datetime]] | None = None,
-                 current: dict | None = None, weekly_stats=None) -> list[str]:
+                 current: dict | None = None, weekly_stats=None, alerts: list[dict] | None = None) -> list[str]:
         """
         stale_sources: [(module_id, Name, seit wann aus dem Cache), …]
         current: {"module_name", "rendered_at"} fürs Tagesbild
         weekly_stats: Callable → dict (ack_stats über 7 Tage) für den Wochenbericht
+        alerts: gerade gültige Warnungen (InkwallModule.get_alerts); None = nicht abgefragt
         """
         if not self.url:
             return []
         with _NOTIFY_LOCK:
-            return self._on_cycle(last_ack, now_local, stale_sources, current, weekly_stats)
+            return self._on_cycle(last_ack, now_local, stale_sources, current, weekly_stats, alerts)
 
-    def _on_cycle(self, last_ack: dict, now_local: datetime, stale_sources, current, weekly_stats) -> list[str]:
+    def _on_cycle(self, last_ack: dict, now_local: datetime, stale_sources, current, weekly_stats, alerts=None) -> list[str]:
         now_utc = now_local.astimezone(timezone.utc) if now_local.tzinfo else now_local.replace(tzinfo=timezone.utc)
         sent: list[str] = []
         state, markers = self._markers()
@@ -442,6 +446,35 @@ class Notifier:
                     name = next((n for m, n, _ in (stale_sources or []) if m == module_id), module_id)
                     if self._send(Notification("source_up", f"{name}: Quelle wieder erreichbar", f"{name} liefert wieder aktuelle Daten.")):
                         sent.append("source_up")
+
+        # Warnungen (Unwetter, NINA): je Warnung eine Nachricht, und eine Entwarnung, wenn sie nicht mehr gilt
+        if alerts is not None and "warnings" in self.events:
+            known: dict = markers.get("alerts") or {}
+            current_alerts = {a["id"]: a for a in alerts if isinstance(a, dict) and a.get("id")}
+            for alert_id, alert in current_alerts.items():
+                if alert_id in known:
+                    continue
+                known[alert_id] = str(alert.get("title", ""))[:160]
+                markers["alerts"] = known
+                changed = True
+                fields = [("Quelle", alert.get("source") or "–")]
+                if alert.get("area"):
+                    fields.append(("Gebiet", str(alert["area"])[:200]))
+                if alert.get("until"):
+                    fields.append(("Gilt bis", alert["until"]))
+                severe = alert.get("severity") in ("severe", "extreme")
+                text = str(alert.get("text") or "").strip()
+                note = Notification("alert" if severe else "alert_info", str(alert.get("title") or "Warnung"),
+                                    (text[:700] + "…") if len(text) > 700 else (text or "Neue Warnung."),
+                                    fields=fields, priority="high" if severe else "")
+                if self._send(note):
+                    sent.append("alert")
+            for alert_id in [k for k in known if k not in current_alerts]:
+                title = known.pop(alert_id)
+                markers["alerts"] = known
+                changed = True
+                if self._send(Notification("alert_end", f"Entwarnung: {title}", "Diese Warnung gilt nicht mehr.")):
+                    sent.append("alert_end")
 
         # Tagesbild
         today = now_local.strftime("%Y-%m-%d")

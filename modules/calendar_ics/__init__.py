@@ -77,6 +77,18 @@ SETTINGS_FIELDS: list[dict] = [
         "options": [("true", "Ausblenden, sobald sie vorbei sind"), ("false", "Den ganzen Tag zeigen")],
         "help":    "Ganztägige Termine bleiben immer sichtbar.",
     },
+    {
+        "name":    "CALENDAR_HOLIDAYS",
+        "label":   "Feiertage und Ferien",
+        "type":    "select",
+        "wide":    False,
+        "default": "both",
+        "options": [("both", "Feiertage und Schulferien"), ("public", "Nur Feiertage"), ("off", "Nicht zeigen")],
+        "help":    (
+            "Aus dem Bundesland unter System. Ferien stehen einmal mit ihrem Ende im Kalender. "
+            "Ohne eigene ICS-Adresse zeigt der Kalender nur Feiertage und Ferien."
+        ),
+    },
 ]
 
 SETTINGS_GROUPS: list[dict] = []
@@ -94,9 +106,9 @@ class CalendarModule(InkwallModule):
     SETTINGS_GROUPS  = SETTINGS_GROUPS
 
     def is_enabled(self, env: dict[str, str]) -> bool:
-        from .data_source import parse_sources
+        from .data_source import holidays_active, parse_sources
         idle = {x.strip() for x in env.get("IDLE_MODULES", "").split(",") if x.strip()}
-        return self.MODULE_ID in idle and bool(parse_sources(env.get("CALENDAR_ICS_URLS", "")))
+        return self.MODULE_ID in idle and (bool(parse_sources(env.get("CALENDAR_ICS_URLS", ""))) or holidays_active(env))
 
     def fetch_content(self, env: dict[str, str]) -> dict | None:
         from .data_source import fetch_calendar_content
@@ -142,10 +154,12 @@ class CalendarModule(InkwallModule):
         }
 
     def describe_status(self, env: dict[str, str]) -> dict[str, str]:
-        from .data_source import parse_sources, source_state
+        from .data_source import holidays_active, parse_sources, source_state
         sources = parse_sources(env.get("CALENDAR_ICS_URLS", ""))
         if not sources:
-            return {"state": "missing", "reason": "ICS-Adresse fehlt"}
+            if holidays_active(env):
+                return {"state": "ready", "reason": ""}
+            return {"state": "missing", "reason": "ICS-Adresse oder Bundesland für Feiertage fehlt"}
         # Nur aus dem Cache lesen (wird bei jedem Seitenaufruf gefragt): alle Quellen
         # gescheitert und nie etwas geladen → Fehler mit der ersten Meldung
         states = [source_state(url) for _, url in sources]
@@ -154,9 +168,11 @@ class CalendarModule(InkwallModule):
         return {"state": "ready", "reason": ""}
 
     def summarize(self, env: dict[str, str]) -> str:
-        from .data_source import fetch_calendar_content, parse_sources
+        from .data_source import HOLIDAY_LABEL, fetch_calendar_content, holidays_active, parse_sources
         sources = parse_sources(env.get("CALENDAR_ICS_URLS", ""))
         names = [label or f"Kalender {i + 1}" for i, (label, _) in enumerate(sources)]
+        if holidays_active(env):
+            names.append(HOLIDAY_LABEL)
         if not names:
             return ""
         parts = [", ".join(names), f"{env.get('CALENDAR_DAYS_AHEAD', '7')} Tage"]
@@ -177,10 +193,13 @@ class CalendarModule(InkwallModule):
         Lädt alle Kalender neu und liefert Details: je Quelle Anzahl oder
         Fehler, dazu die nächsten Termine mit Quelle.
         """
-        from .data_source import fetch_calendar_content, parse_sources, source_state
+        from .data_source import fetch_calendar_content, holidays_active, parse_sources, source_state
         sources = parse_sources(env.get("CALENDAR_ICS_URLS", ""))
         content = fetch_calendar_content(True)
         days_ahead = (content or {}).get("days_ahead") or env.get("CALENDAR_DAYS_AHEAD", "7")
+        if not sources and holidays_active(env) and not content:
+            return {"ok": True, "message": f"Keine Feiertage oder Ferien in den nächsten {days_ahead} Tagen",
+                    "details": ["Ohne eigene ICS-Adresse zeigt der Kalender nur Feiertage und Ferien – und nur, wenn welche anstehen."]}
         details: list[str] = ["Quellen:"]
         if content:
             for src in content["sources"]:
@@ -222,10 +241,12 @@ class CalendarModule(InkwallModule):
     def validate_settings(self, updates: dict[str, str], env: dict[str, str]) -> list[str]:
         from .data_source import parse_sources
         errors: list[str] = []
+        from .data_source import holidays_active
         raw = env.get("CALENDAR_ICS_URLS", "").strip()
         idle = {x.strip() for x in env.get("IDLE_MODULES", "").split(",") if x.strip()}
-        if self.MODULE_ID in idle and not raw:
-            errors.append("Kalender: Bitte mindestens eine ICS-Adresse angeben, wenn das Modul aktiv ist.")
+        if self.MODULE_ID in idle and not raw and not holidays_active(env):
+            errors.append("Kalender: Bitte mindestens eine ICS-Adresse angeben (oder unter System ein Bundesland "
+                          "für Feiertage und Ferien), wenn das Modul aktiv ist.")
         if raw and not parse_sources(raw):
             errors.append("Kalender: Keine gültige ICS-Adresse gefunden (http://, https:// oder webcal://).")
         for key, label in (("CALENDAR_DAYS_AHEAD", "Zeitraum (Tage)"), ("CALENDAR_MAX_EVENTS", "Max. Termine")):

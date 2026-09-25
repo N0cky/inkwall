@@ -572,6 +572,7 @@
             parts.push(w.content.map(function (c) { var m = findModule(c.id); return (m ? m.name : c.id) + (dash && c.height ? ' ' + c.height + ' %' : ''); }).join(', '));
         } else parts.push('alle Inhalte des Programms');
         parts.push(intervalText(w.interval_seconds));
+        if (w.school) parts.push(w.school === 'ferien' ? 'nur in den Schulferien' : 'nur außerhalb der Schulferien');
         return parts.join(' · ');
     }
 
@@ -626,6 +627,7 @@
             + '<label>Bis <input type="time" data-wf="end" value="' + esc(w.end) + '"></label>'
             + '<label>Darstellung <select data-wf="layout"><option value="">Wie im Programm</option><option value="rotation"' + (w.layout === 'rotation' ? ' selected' : '') + '>Rotation</option><option value="dashboard"' + (w.layout === 'dashboard' ? ' selected' : '') + '>Dashboard</option></select></label>'
             + '<label>Takt (min) <input type="number" min="1" max="1440" data-wf="interval" placeholder="wie im Programm" value="' + (w.interval_seconds ? Math.round(w.interval_seconds / 60) : '') + '"></label>'
+            + '<label>Schulferien <select data-wf="school"><option value="">Immer</option><option value="ferien"' + (w.school === 'ferien' ? ' selected' : '') + '>Nur in den Ferien</option><option value="schule"' + (w.school === 'schule' ? ' selected' : '') + '>Nur außerhalb</option></select></label>'
             + '</div>'
             + '<div class="days-row"><span class="hint">Tage</span>' + dayBtns
             + '<button type="button" class="btn small" data-days="0,1,2,3,4">Mo–Fr</button><button type="button" class="btn small" data-days="5,6">Sa+So</button><button type="button" class="btn small" data-days="0,1,2,3,4,5,6">Täglich</button></div>'
@@ -633,7 +635,7 @@
             + '<label class="preview-check"><input type="radio" name="wc-mode-' + i + '" value="all"' + (pick ? '' : ' checked') + '> Alle Inhalte des Programms</label>'
             + '<label class="preview-check"><input type="radio" name="wc-mode-' + i + '" value="pick"' + (pick ? ' checked' : '') + '> Nur diese Inhalte' + (dash ? ' (Reihenfolge und Höhe der Kacheln)' : '') + ':</label>'
             + '<div class="win-list' + (pick ? '' : ' disabled') + '">' + (list || '<span class="hint">Keine eingerichteten Inhalte.</span>') + '</div></div>'
-            + '<div class="hint">Leere Felder übernehmen den Wert aus dem Programm. Liegt „Bis“ vor „Von“, läuft das Fenster über Mitternacht.</div>'
+            + '<div class="hint">Leere Felder übernehmen den Wert aus dem Programm. Liegt „Bis“ vor „Von“, läuft das Fenster über Mitternacht. Die Schulferien kommen vom Bundesland unter <a href="/system">System</a>.</div>'
             + '</div>';
     }
 
@@ -759,7 +761,7 @@
             content: draft.content.map(function (m) { return { id: m.id, enabled: m.enabled, height: m.height || null }; }),
             live: draft.live.map(function (m) { return { id: m.id, enabled: m.enabled }; }),
             schedule: { windows: (draft.schedule ? draft.schedule.windows : []).map(function (w) {
-                return { name: w.name, days: w.days, start: w.start, end: w.end, layout: w.layout || '', interval_seconds: w.interval_seconds || 0,
+                return { name: w.name, days: w.days, start: w.start, end: w.end, layout: w.layout || '', interval_seconds: w.interval_seconds || 0, school: w.school || '',
                          content: (w.content || []).map(function (c) { return { id: c.id, height: c.height || null }; }) };
             }) }
         };

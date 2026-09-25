@@ -33,6 +33,8 @@ Supported output modes:
 - **Tagesschau news** – current news cards with thumbnail and teaser text
 - **Müllabfuhr** – next garbage collection days from your municipality's ICS calendar, bin colours and icons included, with a `{year}` placeholder so the URL never needs a yearly update; reminder banner in the evening before collection (the module then jumps ahead in the rotation), week strip or list for the coming days, one column per address if you like, and the last good calendar is kept when the municipality's server is down
 - **Kalender** – today and the next days from one or more ICS calendars (Google, Nextcloud, iCloud, Outlook, Thunderbird), with recurring events of every kind ("every 2nd Tuesday", moved and cancelled single dates, any time zone notation), a colour per calendar and multi-day events; the last good calendar is kept on disk and shown with "Stand vom …" when a source is down, and "Verbindung prüfen" lists the next appointments per calendar
+- **Warnungen (NINA)** – civil protection warnings for your district from warnung.bund.de (disaster control, floods, police, warning day): the content only appears while a warning is active and then comes first; enter your town, the module finds its district. Severe weather warnings (DWD level 3 and above) also move the weather to the front
+- **Holidays and school holidays** – public holidays and school holidays of your federal state (openholidaysapi.org) in the calendar (even without an ICS calendar), as the reason for shifted garbage collections ("wegen Pfingstmontag verschoben") and as a condition for schedule windows (only during or outside school holidays)
 - **Abfahrten** – next departures of trains and public transport at up to three stops (delay, line, destination, platform, minutes to go), stops by name or IBNR, via a transport.rest instance of your choice
 - **Tankpreise** – cheapest fuel stations around your coordinates or a fixed list of your regulars (Tankerkönig / MTS-K, CC BY 4.0), prices per fuel with the big-9 look, cheapest green and priciest red; the module collects its own history every five minutes and shows today's curve, the last 7 and 30 days, an hour-of-day profile, average per weekday, the lows, the best time to fill up and today's saving; a price alert makes the content urgent
 - **Schedule** – time windows per weekday with their own contents, layout and refresh interval: weather and garbage in the morning, the dashboard during the day, the calendar in the evening, everything slower at night. Outside the windows the normal programme applies
@@ -244,9 +246,10 @@ Recommended setup for all environments:
 | `OUTPUT_FORMAT` | `bmp` (Spectra 6 dithering plus the compact panel format the firmware loads) or `png` (regular screens; the firmware then gets no image) | `bmp` |
 | `REFRESH_INTERVAL` | Poll interval in seconds | `60` |
 | `TIMEZONE` | IANA timezone, for example `Europe/Berlin` | `Europe/Berlin` |
+| `HOLIDAY_REGION` | Federal state for public and school holidays (`DE-HE`, `DE-BY`, …): calendar, garbage shift reasons, schedule windows only during/outside school holidays. Empty = off | `` |
 | `NOTIFY_URL` | Notification target: an ntfy topic (`https://ntfy.sh/my-display`), a Discord or Slack webhook, or any URL accepting a text POST. One message when the device has been silent for `NOTIFY_OFFLINE_MINUTES`, one when it is back | `` |
 | `NOTIFY_OFFLINE_MINUTES` | Minutes without an acknowledgement before the outage message is sent, `0` = never | `30` |
-| `NOTIFY_EVENTS` | Which events are sent: `offline` (outage and recovery), `firmware` (update installed, rollback), `errors` (three error cycles in a row), `sources` (a content shows cached data for more than 6 h), `daily` (morning picture of the display), `weekly` (Monday report from the acknowledgement history) | `offline,firmware` |
+| `NOTIFY_EVENTS` | Which events are sent: `offline` (outage and recovery), `firmware` (update installed, rollback), `errors` (three error cycles in a row), `sources` (a content shows cached data for more than 6 h), `daily` (morning picture of the display), `weekly` (Monday report from the acknowledgement history), `warnings` (severe weather from level 3 and NINA warnings, one message per warning and an all-clear) | `offline,firmware` |
 | `NOTIFY_DAILY_HOUR` | Hour from which the daily picture and the weekly report are sent | `7` |
 | `NOTIFY_BASE_URL` | How you reach the server in the browser; gives every message a link to the *Gerät* page and lets Slack embed the image | `` |
 | `NOTIFY_AVATAR_URL` | Public image URL used as Discord avatar and ntfy icon; empty uses the project logo from GitHub | `` |
@@ -254,7 +257,7 @@ Recommended setup for all environments:
 | `IDLE_LAYOUT` | `rotation` (one module per image, in turns) or `dashboard` (several modules stacked as tiles in one image) | `rotation` |
 | `DASHBOARD_TILES` | Tile order and heights for the dashboard, e.g. `dwd_weather:45, calendar:30, garbage:25`. Modules without a percentage share the rest. Empty: all active idle modules with equal height | `` |
 | `IDLE_MODULE_ROTATION_SECONDS` | Rotation interval between idle modules | `120` |
-| `SCHEDULE_WINDOWS` | Schedule: time windows with their own contents, layout and interval, `Name\|days\|HH:MM-HH:MM\|layout\|seconds\|contents`, several separated by `;` (e.g. `Morgens\|Mo-Fr\|06:00-09:00\|rotation\|120\|dwd_weather,garbage; Nachts\|*\|23:00-07:00\|\|900\|`). Empty parts inherit from the programme; the first matching window wins; managed on the *Anzeige* page | `` |
+| `SCHEDULE_WINDOWS` | Schedule: time windows with their own contents, layout and interval, `Name\|days\|HH:MM-HH:MM\|layout\|seconds\|contents\|school` (`school`: `ferien` = only during school holidays, `schule` = only outside, empty = always), several separated by `;` (e.g. `Morgens\|Mo-Fr\|06:00-09:00\|rotation\|120\|dwd_weather,garbage; Nachts\|*\|23:00-07:00\|\|900\|`). Empty parts inherit from the programme; the first matching window wins; managed on the *Anzeige* page | `` |
 | `NIGHT_MODE_ENABLED` | Legacy night mode, honoured only while `SCHEDULE_WINDOWS` is empty (the UI converts it into a window on save) | `false` |
 | `NIGHT_MODE_START` | Local start time for night mode (`HH:MM`) | `23:00` |
 | `NIGHT_MODE_END` | Local end time for night mode (`HH:MM`) | `07:00` |
@@ -323,6 +326,7 @@ Inkwall/
 │   ├── notifications.py        # Discord, ntfy and Slack messages (outage, firmware, reports)
 │   ├── epd_format.py           # Compact 4-bit panel format (/current.epd)
 │   ├── ics.py                  # ICS parsing for Kalender and Müllabfuhr (recurrences, time zones)
+│   ├── holidays.py             # Public and school holidays per federal state (openholidaysapi.org)
 │   ├── logger.py               # JSONL + console logging with secret masking
 │   ├── module_base.py          # InkwallModule base class for all modules
 │   ├── module_registry.py      # Module auto-discovery and hot reload
@@ -359,6 +363,10 @@ Inkwall/
 │   │   ├── __init__.py         # Abfahrten module
 │   │   ├── data_source.py      # transport.rest client, stop lookup
 │   │   └── renderer.py         # Departure board
+│   ├── nina/
+│   │   ├── __init__.py         # Warnungen (NINA) module, only content while a warning is active
+│   │   ├── data_source.py      # warnung.bund.de, town → district key
+│   │   └── renderer.py         # Warning page and tile
 │   ├── fuel_prices/
 │   │   ├── __init__.py         # Tankpreise module
 │   │   ├── data_source.py      # Tankerkönig client, stations

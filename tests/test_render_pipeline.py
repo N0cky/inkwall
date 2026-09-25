@@ -132,6 +132,30 @@ class SaveImageTest(_PipelineTestBase):
         self.assertEqual(plain.crop((0, 100, 600, 800)).tobytes(), stamped.crop((0, 100, 600, 800)).tobytes())
         self.assertEqual(dashboard.tobytes(), plain.tobytes(), "Dashboard bekommt keine zweite Uhrzeit")
 
+    def test_stamp_alone_is_no_change(self) -> None:
+        """Nur die Uhrzeit ist anders → gleicher Hash, altes Bild (mit alter Uhrzeit) bleibt."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        class _Stamped(_FakeCfg):
+            show_render_time = True
+
+        berlin = ZoneInfo("Europe/Berlin")
+        img = Image.new("RGB", (600, 800), (30, 30, 30))
+        with patch.object(server, "get_cfg", return_value=_Stamped()):
+            with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 10, 0, tzinfo=berlin)):
+                server._save_image(img, "fake:a", "fake")
+            first_hash = server._esp32_state["hash"]
+            first_bytes = (self.tmp / "current.png").read_bytes()
+            with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 10, 7, tzinfo=berlin)):
+                server._save_image(img.copy(), "fake:b", "fake")
+            self.assertEqual(server._esp32_state["hash"], first_hash, "nur die Uhrzeit anders: kein neues Bild fürs Gerät")
+            self.assertEqual((self.tmp / "current.png").read_bytes(), first_bytes, "das Bild mit der alten Uhrzeit bleibt")
+            self.assertEqual(server._esp32_state["state"], "fake:b")
+            with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 10, 9, tzinfo=berlin)):
+                server._save_image(Image.new("RGB", (600, 800), (200, 30, 30)), "fake:c", "fake")
+            self.assertNotEqual(server._esp32_state["hash"], first_hash, "anderer Inhalt: neues Bild")
+
     def test_writes_png_atomically_and_hashes_bytes(self) -> None:
         img = Image.new("RGB", (4, 4), (0, 255, 0))
         server._save_image(img, "fake:1", "fake")

@@ -142,7 +142,8 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
     from app.schedule import active_window, describe_window, effective_windows
     windows = effective_windows(cfg)
     module_names = {m.MODULE_ID: m.MODULE_NAME for m in _registry.get_modules()}
-    active, seconds_until_change, upcoming = active_window(windows, now_local()) if windows else (None, 0, None)
+    from app.holidays import school_holiday_checker
+    active, seconds_until_change, upcoming = active_window(windows, now_local(), school_holiday_checker(windows)) if windows else (None, 0, None)
 
     from app.device import RESET_LABELS, firmware_info, firmware_update_expected, last_clean_at, rssi_quality, test_banner_pending
     fw = firmware_info()
@@ -336,6 +337,11 @@ def schedule_errors(payload: dict, programme_layout: str = "rotation") -> list[s
     windows = [window_from_dict(w, i) for i, w in enumerate(schedule_payload["windows"]) if isinstance(w, dict)]
     idle = {m.MODULE_ID: m for m in _registry.get_idle_modules()}
     errors = validate_windows(windows, set(idle))
+    from app.holidays import configured_region
+    if any(w.school for w in windows) and not configured_region():
+        name = next(w.name for w in windows if w.school)
+        errors.append(f"Zeitplan: Fenster „{name}“ hängt an den Schulferien – dafür unter System das Bundesland "
+                      "für Feiertage und Ferien einstellen.")
     for w in windows:
         layout = w.layout or programme_layout
         if layout != "dashboard":

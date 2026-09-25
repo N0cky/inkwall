@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 
 from app import ics
 from app.config import DATA_DIR, WEEKDAYS_DE_LONG, get_int_setting, get_setting, now_local
+from app.holidays import shift_reason
 from app.http_client import HTTP_SESSION, FETCH_RETRY_BACKOFF_SECONDS, network_allowed
 from app.logger import get_logger
 
@@ -390,7 +391,8 @@ def usual_weekdays(all_events: list[dict]) -> dict[tuple[str, str], int]:
 
 def build_garbage_content(all_events: list[dict], today: date, days_ahead: int,
                           overrides: list[tuple[str, str]] | None = None,
-                          today_done: bool = False, reminder_active: bool = False) -> dict | None:
+                          today_done: bool = False, reminder_active: bool = False,
+                          public_holidays: list[dict] | None = None) -> dict | None:
     """
     Gruppiert Termine nach Tag. 'days' enthält das Fenster [heute, heute+days_ahead];
     'next' ist der nächste Abfuhrtag – notfalls auch jenseits des Fensters (bis 1 Jahr),
@@ -398,7 +400,8 @@ def build_garbage_content(all_events: list[dict], today: date, days_ahead: int,
 
     today_done: heutige Termine gelten als erledigt (Tonne ist geleert) und
     werden übersprungen. reminder_active: es ist Abend – ein Termin morgen ist
-    dringend.
+    dringend. public_holidays: Feiertage (app.holidays) – ein verschobener
+    Termin nennt dann den Feiertag, der ihn verschoben hat.
     """
     usual = usual_weekdays(all_events)
     seen: set[tuple[date, str, str]] = set()
@@ -415,6 +418,7 @@ def build_garbage_content(all_events: list[dict], today: date, days_ahead: int,
         seen.add(key)
         series = (ev.get("summary", ""), ev.get("label", ""))
         shifted = usual.get(series)
+        shifted_from = WEEKDAYS_DE_LONG[shifted] if shifted is not None and shifted != d.weekday() else ""
         future.append({
             "date": d,
             "in_days": (d - today).days,
@@ -422,7 +426,8 @@ def build_garbage_content(all_events: list[dict], today: date, days_ahead: int,
             "label": ev.get("label", ""),
             "color": classify_type(ev.get("summary", ""), overrides),
             "icon": classify_icon(ev.get("summary", "")),
-            "shifted_from": WEEKDAYS_DE_LONG[shifted] if shifted is not None and shifted != d.weekday() else "",
+            "shifted_from": shifted_from,
+            "shifted_reason": shift_reason(d, public_holidays) if shifted_from and public_holidays else "",
         })
     if not future:
         return None
@@ -521,10 +526,15 @@ def fetch_garbage_content(force_refresh: bool = False) -> dict | None:
     if not any_loaded and not missing_years:
         return None
 
+    # Feiertage rund um die kommenden Termine (Bundesland unter System), für „wegen … verschoben“
+    from app import holidays
+    public_holidays = holidays.between(holidays.PUBLIC, today - timedelta(days=7), today + timedelta(days=days_ahead + 7))
+
     content = build_garbage_content(
         all_events, today, days_ahead, overrides,
         today_done=now.hour >= done_hour,
         reminder_active=now.hour >= reminder_hour,
+        public_holidays=public_holidays,
     )
     if content is None:
         if not missing_years:
