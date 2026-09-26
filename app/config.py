@@ -26,7 +26,7 @@ from dotenv import dotenv_values
 from PIL import ImageFont
 
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 # ---------------------------------------------------------------------------
 # Verzeichnisse

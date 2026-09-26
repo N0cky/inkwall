@@ -105,5 +105,20 @@ window.ui = (function () {
         return m + ':' + String(s % 60).padStart(2, '0');
     }
 
-    return { esc: esc, json: json, toast: toast, fmtTime: fmtTime, fmtDateTime: fmtDateTime, ago: ago, mmss: mmss, poll: poll };
+    /* In die Zwischenablage. navigator.clipboard gibt es nur über HTTPS (oder localhost) –
+       die Oberfläche läuft meist als http://IP:8787, dann über ein unsichtbares Textfeld */
+    async function copy(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+        } catch (e) { /* weiter mit dem Textfeld */ }
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        ta.remove();
+        return ok;
+    }
+
+    return { esc: esc, json: json, toast: toast, fmtTime: fmtTime, fmtDateTime: fmtDateTime, ago: ago, mmss: mmss, poll: poll, copy: copy };
 })();

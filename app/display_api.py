@@ -104,6 +104,86 @@ def panel_setup_issues(cfg) -> list[str]:
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Einrichtung eines Geräts (Karte auf der Gerät-Seite)
+# ---------------------------------------------------------------------------
+
+FIRMWARE_FQBN = "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB"
+FIRMWARE_CORE = "esp32:esp32@3.3.8"
+REJECTION_WINDOW_S = 3600      # so lange gilt eine Abweisung als aktuell (ohne spätere Rückmeldung)
+
+
+def _ack_epoch(last_ack: dict) -> float | None:
+    raw = str(last_ack.get("ack_at", "") or "")
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() if raw else None
+    except ValueError:
+        return None
+
+
+def recent_rejection(last_ack: dict, contact: dict | None) -> dict | None:
+    """Die letzte Abweisung am Geräte-Token, wenn sie jünger als eine Stunde ist und danach keine Rückmeldung kam."""
+    rejected = (contact or {}).get("rejected")
+    if not rejected:
+        return None
+    import time as _time
+    if _time.time() - rejected["at"] > REJECTION_WINDOW_S:
+        return None
+    ack_at = _ack_epoch(last_ack)
+    if ack_at is not None and ack_at >= rejected["at"]:
+        return None
+    return rejected
+
+
+def panel_fix_updates(cfg, theme: bool = False) -> dict[str, str]:
+    """Einstellungen, mit denen das mitgelieferte Panel ein Bild bekommt (leer, wenn schon alles passt)."""
+    updates: dict[str, str] = {}
+    if cfg.output_format != "bmp":
+        updates["OUTPUT_FORMAT"] = "bmp"
+    if (cfg.render_width, cfg.render_height) != PANEL_SIZE:
+        updates.update(RENDER_WIDTH="1600", RENDER_HEIGHT="1200", DISPLAY_ROTATION="90")
+    if theme and cfg.display_theme != "eink":
+        updates["DISPLAY_THEME"] = "eink"
+    return updates
+
+
+def device_setup_state(last_ack: dict, contact: dict | None, token_required: bool) -> dict[str, Any]:
+    import time as _time
+    cfg = get_cfg()
+    now = _time.time()
+
+    def contact_view(entry):
+        if not entry:
+            return None
+        return {"remote": entry.get("remote", ""), "path": entry.get("path", ""), "seconds_ago": max(0, int(now - entry["at"]))}
+
+    ack_at = _ack_epoch(last_ack)
+    device = None
+    if ack_at is not None:
+        device = {
+            "device_id": str(last_ack.get("device_id", "") or ""),
+            "fw_version": str(last_ack.get("fw_version", "") or ""),
+            "seconds_since_ack": max(0, int(now - ack_at)),
+            "result": str(last_ack.get("result", "") or ""),
+            "error": str(last_ack.get("error", "") or ""),
+            "remote": str(last_ack.get("remote", "") or ""),
+        }
+    rejected = recent_rejection(last_ack, contact)
+    return {
+        "issues": panel_setup_issues(cfg),
+        "settings": {
+            "output_format": cfg.output_format,
+            "size": f"{cfg.render_width} × {cfg.render_height}",
+            "theme": cfg.display_theme,
+        },
+        "token_required": token_required,
+        "server_hint": str(get_settings_values().get("NOTIFY_BASE_URL", "") or "").strip().rstrip("/"),
+        "device": device,
+        "contact": {"meta": contact_view((contact or {}).get("meta")), "rejected": contact_view(rejected)},
+        "build": {"fqbn": FIRMWARE_FQBN, "core": FIRMWARE_CORE, "sketch": "esp32/Inkwall"},
+    }
+
+
 def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int, str]) -> dict[str, Any]:
     env = get_settings_values()
     cfg = get_cfg()
@@ -599,7 +679,7 @@ def _duration(seconds: int) -> str:
 
 
 def build_issues(esp32_state: dict, last_ack: dict, expected_seconds: int, worker: dict,
-                 stale_sources: list | None = None, alerts: list | None = None) -> list[dict]:
+                 stale_sources: list | None = None, alerts: list | None = None, contact: dict | None = None) -> list[dict]:
     """
     [{"level": "danger" | "warn" | "info", "text", "href"}, …] – leer, wenn alles läuft.
     Nur aus Speicher und Cache (der Aufrufer schaltet cache_only ein).
@@ -611,6 +691,12 @@ def build_issues(esp32_state: dict, last_ack: dict, expected_seconds: int, worke
     if not worker.get("ok", True):
         issues.append({"level": "danger", "href": "/system",
                        "text": "Der Server erzeugt keine neuen Bilder mehr (Render-Worker hängt) – Container neu starten."})
+
+    # Gerät, das am Token scheitert (erreicht den Server, darf aber nichts melden)
+    rejected = recent_rejection(last_ack, contact)
+    if rejected:
+        issues.append({"level": "danger", "href": "/geraet",
+                       "text": f"Ein Gerät ({rejected['remote']}) wird abgewiesen: Geräte-Token fehlt oder passt nicht."})
 
     # Gerät
     ack_raw = str(last_ack.get("ack_at", "") or "")

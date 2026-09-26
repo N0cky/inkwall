@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-26
+
+### Added
+
+- Setup card *Gerät einrichten* on the *Gerät* page, four steps: (1) settings for the panel – shows what does not fit and sets format and size with one click, optionally the E-Ink theme; (2) `config.private.h` filled in with the server address, Wi-Fi name, password, device name and token typed into the page (they stay in the browser; password and token are hidden in the preview, copied in full); (3) the `arduino-cli` commands to install the core, build and flash over USB for the chosen port; (4) waits live (every 5 s) for the device and says whether it has asked for the image, has reported, reports an error or is refused at the device token. The card opens by itself while no device has reported, the settings do not fit or a device is refused; otherwise *Weiteres Gerät einrichten* opens it (`/api/device/setup`, `/api/device/setup/fix`)
+- The server notes the last request of a device (`/meta.json` from the firmware) and the last refusal at the device token (a wrong token, or the firmware without one); the status strip shows a refused device for an hour or until it reports successfully
+- Copy buttons work over plain HTTP too (the web UI usually runs as `http://IP:8787`, where the Clipboard API is missing)
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

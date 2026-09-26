@@ -44,6 +44,7 @@ Supported output modes:
 - **Gallery** – local image folders as an idle module with random selection, blur background, and optional overlay
 - **Modular architecture** – add new content sources as standalone modules without touching the core framework
 - **E-Ink, dark and light themes** – flat Spectra 6 colours for the E-Ink panel (the default), dark and light for regular screens
+- **Device setup card** – on the *Gerät* page: sets format and size for the panel with one click, fills in `config.private.h` (Wi-Fi and token typed into the page stay in the browser), shows the build and flash commands for your port, and waits live for the device – including "it reaches the server but is refused at the device token"
 - **Status strip** – every page shows what needs attention right now: the display has gone silent or reports an error, a content source is down, a firmware update is waiting, a warning is active; each line links to the page that helps
 - **Settings history** – before every change the previous `settings.env` is kept (the last 30); the *System* page lists them with the settings that changed since and brings one back with a click
 - **Web UI** – four pages that follow the user's questions: *Anzeige* (what the display shows, with the programme, switches, order and previews), *Inhalte* (one card per source with its own save button and a connection test), *Gerät* (display and ESP32 status), *System* (events, time zone, backup and restore)
@@ -310,6 +311,8 @@ When settings are changed through the web UI, the application writes them back t
 | `/api/settings/<module_id>` | GET, PUT | Fields of one module card (`framework` for device and system fields) with current values; PUT validates and returns errors per field. Passwords are never returned, an empty password keeps the stored one |
 | `/api/probe/<module_id>` | POST | Fetch the module's source once and report the result in one sentence; with `{"values": {…}}` it tests unsaved form values (only for this request) |
 | `/api/logs?events=1` | GET | Only events (content switched, device reported, settings saved, source unreachable) instead of every render line |
+| `/api/device/setup` | GET | Setup card: settings that keep the panel from an image, last device contact (asked for the image, refused at the token), last acknowledgement, build parameters; whether a device token is required, never its value |
+| `/api/device/setup/fix` | POST | Set format and size for the included panel (`{"theme": true}` also sets the E-Ink theme); returns the changed keys |
 | `/api/issues` | GET | What needs attention (status strip): `[{"level": "danger" \| "warn" \| "info", "text", "href"}]`, empty when all is well; answered from the cache |
 | `/api/settings/backups` | GET | Previous states of `settings.env`, newest first, with the settings that differ from now (names and labels, no values) |
 | `/api/settings/backups/<id>/restore` | POST | Bring a previous state back; the current one is kept first |
@@ -621,7 +624,9 @@ Connecting a panel:
 
 1. Create `esp32/Inkwall/config.private.h` (not committed) with your Wi-Fi, `SERVER_BASE_URL` (how the ESP32 reaches the server, e.g. `http://192.168.178.6:8787`) and optionally `DEVICE_TOKEN`; everything else comes from `config.example.h`.
 2. Build and flash once over USB – see [`esp32/Inkwall/README.md`](esp32/Inkwall/README.md). Later updates go over the air from the *Gerät* page.
-3. On the server, keep the defaults `OUTPUT_FORMAT=bmp` and 1200 × 1600 (1600 × 1200 with `DISPLAY_ROTATION=90`): the firmware refuses any other size, and with `png` there is no panel image. The *Gerät* page shows the address to enter as long as no device has reported, and warns when format or size do not fit.
+3. On the server, keep the defaults `OUTPUT_FORMAT=bmp` and 1200 × 1600 (1600 × 1200 with `DISPLAY_ROTATION=90`): the firmware refuses any other size, and with `png` there is no panel image.
+
+The card *Gerät einrichten* on the *Gerät* page walks through these steps: it fixes format and size with one click, fills in `config.private.h` with the server address (Wi-Fi name, password and token typed there stay in the browser), shows the `arduino-cli` commands for your port with a copy button, and then waits live for the device. It opens by itself as long as no device has reported, the settings do not fit the panel or a device is refused at the token; otherwise *Weiteres Gerät einrichten* opens it. Flashing from the browser is not offered: Web Serial needs HTTPS, and the firmware carries its Wi-Fi and server settings compiled in.
 
 `next_wake_sec` is intentionally modular:
 

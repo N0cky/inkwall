@@ -24,6 +24,30 @@
 .chart { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 12px; background: var(--surface3); }
 .table-scroll { overflow-x: auto; margin-top: 10px; }
 .setup { margin: 8px 0 0 18px; font-size: 13px; line-height: 1.6; }
+.setup-card { margin-bottom: 20px; border-color: var(--accent); }
+.setup-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.steps { list-style: none; counter-reset: step; display: grid; gap: 18px; }
+.step { counter-increment: step; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 4px 12px; }
+.step-title { grid-column: 1 / -1; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: center; font-weight: 800; font-size: 14.5px; }
+.step-body { grid-column: 2; display: grid; gap: 8px; font-size: 13px; }
+.step-body > .btn { justify-self: start; }
+.mark { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; background: var(--chip-bg); border: 1px solid var(--border-strong); color: var(--text-soft); }
+.mark::before { content: counter(step); }
+.step.ok .mark { background: var(--ok); border-color: var(--ok); color: #062a16; }
+.step.ok .mark::before { content: "✓"; }
+.step.todo .mark { background: var(--warn); border-color: var(--warn); color: #2a1a02; }
+.step.todo .mark::before { content: "!"; }
+.step.wait .mark::before { content: "…"; }
+.setup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.setup-grid label, .inline-field { display: grid; gap: 5px; font-size: 12px; color: var(--muted); font-weight: 700; }
+.inline-field { display: inline-grid; margin-right: 10px; }
+.setup-grid input, .inline-field input { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface3); color: var(--text); font-family: inherit; font-size: 13px; min-width: 0; }
+.inline-field input { width: 160px; }
+.code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.55; background: var(--surface3); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
+.waiting::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 8px; border-radius: 50%; border: 2px solid var(--accent); border-top-color: transparent; animation: spin .8s linear infinite; vertical-align: -1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .waiting::before { animation: none; } }
+@media (max-width: 640px) { .setup-grid { grid-template-columns: 1fr; } .step, .step-title { grid-template-columns: 28px minmax(0, 1fr); } }
 .setup-warn { color: var(--warn); font-size: 13px; font-weight: 700; line-height: 1.5; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .acks { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .acks th, .acks td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -38,6 +62,45 @@ details[open] summary { margin-bottom: 8px; }
 {% endblock %}
 
 {% block content %}
+<div class="card setup-card" id="setupCard" hidden><div class="card-body">
+    <div class="card-title setup-head"><span>Gerät einrichten</span><button class="btn small" type="button" id="setupClose">Ausblenden</button></div>
+    <ol class="steps">
+        <li class="step" id="step1">
+            <div class="step-title"><span class="mark" aria-hidden="true"></span>Server fürs Panel einstellen</div>
+            <div class="step-body" id="step1Body"></div>
+        </li>
+        <li class="step" id="step2">
+            <div class="step-title"><span class="mark" aria-hidden="true"></span><span><span class="mono">config.private.h</span> anlegen</span></div>
+            <div class="step-body">
+                <div class="hint">Die Datei gehört in den Ordner <span class="mono">esp32/Inkwall</span> neben <span class="mono">Inkwall.ino</span>. Die Felder bleiben in diesem Browser – nichts davon geht an den Server.</div>
+                <div class="setup-grid">
+                    <label>WLAN-Name <input id="suSsid" type="text" autocomplete="off" spellcheck="false"></label>
+                    <label>WLAN-Passwort <input id="suPass" type="password" autocomplete="new-password"></label>
+                    <label>Server-Adresse (so erreicht das Gerät den Server) <input id="suServer" type="text" spellcheck="false"></label>
+                    <label>Gerätename <input id="suDevice" type="text" value="esp32-eink-01" spellcheck="false"></label>
+                    <label id="suTokenWrap" hidden>Geräte-Token (derselbe Wert wie <span class="mono">INKWALL_DEVICE_TOKEN</span>) <input id="suToken" type="password" autocomplete="off"></label>
+                </div>
+                <pre class="code" id="suConfig"></pre>
+                <button class="btn small" type="button" data-copy="config">Datei kopieren</button>
+            </div>
+        </li>
+        <li class="step" id="step3">
+            <div class="step-title"><span class="mark" aria-hidden="true"></span>Bauen und einmal per USB flashen</div>
+            <div class="step-body">
+                <label class="inline-field">Anschluss <input id="suPort" type="text" value="COM4" spellcheck="false"></label>
+                <span class="hint">Windows COM3, COM4 … · Linux /dev/ttyACM0 · macOS /dev/cu.usbmodem…</span>
+                <pre class="code" id="suFlash"></pre>
+                <button class="btn small" type="button" data-copy="flash">Befehle kopieren</button>
+                <div class="hint" style="margin-top:8px">Braucht <a href="https://arduino.github.io/arduino-cli/latest/installation/" target="_blank" rel="noreferrer">arduino-cli</a> (oder die Arduino IDE, siehe <a href="https://github.com/N0cky/inkwall/tree/main/esp32/Inkwall" target="_blank" rel="noreferrer">Anleitung</a>). Startet das Display nach dem Flashen nicht, einmal RESET am ESP32 drücken. Alle späteren Updates gehen ohne Kabel über die Karte „Firmware“.</div>
+            </div>
+        </li>
+        <li class="step" id="step4">
+            <div class="step-title"><span class="mark" aria-hidden="true"></span>Auf das Gerät warten</div>
+            <div class="step-body" id="step4Body" role="status" aria-live="polite"></div>
+        </li>
+    </ol>
+</div></div>
+
 <div class="cols">
     <div class="stack">
         <div class="card"><div class="card-body">
@@ -354,18 +417,16 @@ details[open] summary { margin-bottom: 8px; }
                         : '<button class="btn" type="button" id="testBanner" style="padding:4px 10px">Auf dem Display ausprobieren</button>');
                 }
                 html += kv('Gerätelog', '<a href="/system#geraet">auf der System-Seite</a>');
+                html += kv('Einrichtung', '<button class="btn small" type="button" id="openSetup">Weiteres Gerät einrichten</button>');
             } else {
-                html += '<div class="hint">Noch kein Gerät hat sich gemeldet. So kommt das mitgelieferte ESP32-Panel dazu:</div>'
-                    + '<ol class="setup">'
-                    + '<li>In <span class="mono">esp32/Inkwall/config.private.h</span> das WLAN und <span class="mono">SERVER_BASE_URL "' + esc(location.origin) + '"</span> eintragen.</li>'
-                    + '<li>Firmware bauen und einmal per USB flashen (<a href="https://github.com/N0cky/inkwall/tree/main/esp32/Inkwall" target="_blank" rel="noreferrer">Anleitung</a>), spätere Updates gehen über die Karte „Firmware“.</li>'
-                    + '<li>' + (issues.length ? 'Oben unter „Display“ noch anpassen:' : 'Format und Größe passen schon (BMP, 1200 × 1600).') + '</li>'
-                    + '</ol>' + issueHtml
-                    + '<div class="hint" style="margin-top:8px">Sobald der ESP32 das erste Bild bestätigt, steht er hier.</div>';
+                html += '<div class="hint">Noch kein Gerät hat sich gemeldet – die Schritte dafür stehen oben unter „Gerät einrichten“.</div>'
+                    + '<div class="actions-row" style="margin-top:8px"><button class="btn small" type="button" id="openSetup">Gerät einrichten</button></div>';
             }
             html += kv('Nächstes Aufwachen', 'in ' + esc(ui.mmss(s.next.seconds)) + ' <span class="hint">· ' + esc(s.next.reason) + '</span>');
             html += kv('Aktuelles Bild', esc(s.current.module_name) + ' <span class="hint">um ' + esc(ui.fmtTime(s.current.rendered_at)) + '</span>');
             $('client').innerHTML = html;
+            var os = $('openSetup');
+            if (os) os.addEventListener('click', openSetup);
             var tb = $('testBanner');
             if (tb) tb.addEventListener('click', async function () {
                 tb.disabled = true;
@@ -422,8 +483,130 @@ details[open] summary { margin-bottom: 8px; }
         catch (e) { ui.toast('Konnte nicht entfernen: ' + e.message, 'error'); }
     });
 
+    /* ── Einrichtung: Server fürs Panel, config.private.h, Flashen, auf das Gerät warten ── */
+    var setupState = null, setupPinned = false, setupDismissed = false, setupFetchedAt = 0;
+
+    function setupNeeded(s) { return !s.device || s.issues.length > 0 || !!s.contact.rejected; }
+    function cStr(v) { return '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
+    function inputVal(id, fallback) { var v = $(id).value.trim(); return v || fallback; }
+
+    /* masked: für die Anzeige Passwort und Token verdecken, kopiert wird der echte Wert */
+    function configText(masked) {
+        var pass = $('suPass').value, token = $('suToken').value;
+        var lines = [
+            '#define WIFI_SSID       ' + cStr(inputVal('suSsid', 'MeinWLAN')),
+            '#define WIFI_PASSWORD   ' + (masked && pass ? '"' + '•'.repeat(Math.min(pass.length, 12)) + '"' : cStr(pass || 'MeinPasswort')),
+            '#define SERVER_BASE_URL ' + cStr(inputVal('suServer', location.origin).replace(/\/+$/, '')),
+            '#define DEVICE_ID       ' + cStr(inputVal('suDevice', 'esp32-eink-01')),
+        ];
+        if (setupState && setupState.token_required) {
+            lines.push('#define DEVICE_TOKEN    ' + (masked && token ? '"' + '•'.repeat(Math.min(token.length, 12)) + '"' : cStr(token || 'TOKEN'))
+                       + '   // wie INKWALL_DEVICE_TOKEN im Container');
+        }
+        return '#pragma once\n\n' + lines.join('\n') + '\n';
+    }
+
+    function flashText() {
+        var b = (setupState && setupState.build) || {}, port = inputVal('suPort', 'COM4');
+        return 'cd ' + (b.sketch || 'esp32/Inkwall') + '\n'
+            + 'arduino-cli core install ' + (b.core || 'esp32:esp32') + ' --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json\n'
+            + 'arduino-cli compile --fqbn "' + b.fqbn + '" --export-binaries .\n'
+            + 'arduino-cli upload -p ' + port + ' --fqbn "' + b.fqbn + '" .\n';
+    }
+
+    function renderSnippets() {
+        $('suConfig').textContent = configText(true);
+        $('suFlash').textContent = flashText();
+    }
+    ['suSsid', 'suPass', 'suServer', 'suDevice', 'suToken', 'suPort'].forEach(function (id) { $(id).addEventListener('input', renderSnippets); });
+    document.querySelectorAll('[data-copy]').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+            var text = btn.getAttribute('data-copy') === 'config' ? configText(false) : flashText();
+            ui.toast((await ui.copy(text)) ? 'Kopiert.' : 'Kopieren ging nicht – bitte markieren und von Hand kopieren.', 'ok');
+        });
+    });
+
+    function setStep(id, state) { $(id).className = 'step' + (state ? ' ' + state : ''); }
+
+    function renderSetup() {
+        var s = setupState; if (!s) return;
+        var card = $('setupCard');
+        card.hidden = setupDismissed || !(setupPinned || setupNeeded(s));
+        if (card.hidden) return;
+        $('suTokenWrap').hidden = !s.token_required;
+        if (!$('suServer').value) $('suServer').value = s.server_hint || location.origin;
+
+        // 1 – Einstellungen
+        var eink = s.settings.theme === 'eink';
+        if (s.issues.length) {
+            setStep('step1', 'todo');
+            $('step1Body').innerHTML = s.issues.map(function (i) { return '<div class="setup-warn">' + esc(i) + '</div>'; }).join('')
+                + '<div class="actions-row" style="margin-top:8px"><button class="btn primary small" type="button" id="suFix">Für das Panel einstellen</button>'
+                + (eink ? '' : '<label class="check"><input type="checkbox" id="suFixTheme" checked><span>auch das E-Ink-Theme</span></label>') + '</div>';
+        } else {
+            setStep('step1', 'ok');
+            $('step1Body').innerHTML = '<div class="hint">' + esc(s.settings.output_format.toUpperCase() + ', ' + s.settings.size) + ' – passt zum Panel.'
+                + (eink ? '' : ' Für das Panel empfohlen ist das E-Ink-Theme (nur die sechs Panelfarben).') + '</div>'
+                + (eink ? '' : '<div class="actions-row" style="margin-top:8px"><button class="btn small" type="button" id="suFix" data-theme-only="1">E-Ink-Theme verwenden</button></div>');
+        }
+        var fix = $('suFix');
+        if (fix) fix.addEventListener('click', applyPanelFix);
+
+        // 4 – Lebenszeichen
+        var body = $('step4Body'), d = s.device, rej = s.contact.rejected, meta = s.contact.meta;
+        if (rej) {
+            setStep('step4', 'todo');
+            body.innerHTML = '<div class="setup-warn">Ein Gerät von ' + esc(rej.remote) + ' wurde ' + esc(ui.ago(rej.seconds_ago)) + ' abgewiesen (' + esc(rej.path) + '): Geräte-Token fehlt oder passt nicht.</div>'
+                + '<div class="hint"><span class="mono">DEVICE_TOKEN</span> in <span class="mono">config.private.h</span> muss dem Wert von <span class="mono">INKWALL_DEVICE_TOKEN</span> im Container entsprechen – dann neu bauen und flashen.</div>';
+        } else if (d && d.seconds_since_ack < 900) {
+            setStep('step4', d.result === 'error' ? 'todo' : 'ok');
+            body.innerHTML = '<div><b>Verbunden:</b> ' + esc(d.device_id || d.remote || 'Gerät') + (d.fw_version ? ' · Firmware ' + esc(d.fw_version) : '')
+                + ' · zuletzt ' + esc(ui.ago(d.seconds_since_ack)) + '</div>'
+                + (d.result === 'error' ? '<div class="setup-warn">Das Gerät meldet einen Fehler: ' + esc(d.error || 'ohne Beschreibung') + '</div>'
+                                        : '<div class="hint">Das Display zeigt das Bild vom Server. Fertig.</div>');
+        } else if (meta && meta.seconds_ago < 900) {
+            setStep('step4', 'wait');
+            body.innerHTML = '<div class="waiting">Ein Gerät von ' + esc(meta.remote) + ' hat ' + esc(ui.ago(meta.seconds_ago)) + ' nach dem Bild gefragt – die Rückmeldung kommt, sobald es das Bild gezeigt hat (etwa 40 s).</div>';
+        } else {
+            setStep('step4', 'wait');
+            body.innerHTML = '<div class="waiting">Noch kein Lebenszeichen' + (d ? ' eines neuen Geräts – zuletzt meldete sich ' + esc(d.device_id || 'ein Gerät') + ' ' + esc(ui.ago(d.seconds_since_ack)) : '')
+                + '. Nach dem Flashen verbindet sich das Gerät mit dem WLAN und meldet sich innerhalb einer Minute.</div>';
+        }
+        renderSnippets();
+    }
+
+    async function applyPanelFix() {
+        var themeOnly = this.getAttribute('data-theme-only') === '1';
+        var theme = themeOnly || ($('suFixTheme') ? $('suFixTheme').checked : false);
+        if (deviceBar.isDirty() && !window.confirm('Nicht gespeicherte Änderungen unter „Display“ gehen dabei verloren. Weiter?')) return;
+        this.disabled = true;
+        try {
+            var r = await ui.json('/api/device/setup/fix', { method: 'POST', body: { theme: theme } });
+            setupState = r.setup;
+            ui.toast(r.changed.length ? 'Übernommen – das Bild wird neu erzeugt.' : 'Es passte schon alles.', 'ok', 4000);
+            renderSetup();
+            renderDevice(await loadSettings());
+        } catch (e) { ui.toast('Nicht übernommen: ' + e.message, 'error', 6000); this.disabled = false; }
+    }
+
+    async function loadSetup() {
+        // Sichtbar: alle 5 s nachsehen; sonst reicht alle 30 s (ob die Karte gebraucht wird)
+        if ($('setupCard').hidden && Date.now() - setupFetchedAt < 30000) return;
+        setupFetchedAt = Date.now();
+        setupState = await ui.json('/api/device/setup');
+        renderSetup();
+    }
+    function openSetup() {
+        setupPinned = true; setupDismissed = false;
+        renderSetup();
+        $('setupCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    $('setupClose').addEventListener('click', function () { setupDismissed = true; setupPinned = false; $('setupCard').hidden = true; });
+    var refreshSetup = ui.poll(loadSetup, 5000);
+
     // Unabhängig voneinander: scheitert eine Anfrage, laden die anderen Karten trotzdem
     loadForm();
+    refreshSetup();
     refreshClient();
     refreshHistory();
 })();

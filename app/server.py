@@ -89,6 +89,20 @@ DEVICE_TOKEN_HEADER = "X-Inkwall-Token"
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
 
+# Letzter Kontakt eines Geräts, auch ohne Rückmeldung – für die Einrichtung:
+# „hat nach dem Bild gefragt“ oder „wird am Geräte-Token abgewiesen“
+_device_contact: dict = {"meta": None, "rejected": None}
+
+
+def _is_device_request() -> bool:
+    """Die Firmware schickt den Standard-User-Agent des ESP32-HTTP-Clients."""
+    return "esp32" in request.headers.get("User-Agent", "").lower()
+
+
+def _note_device_contact(kind: str, path: str = "") -> None:
+    _device_contact[kind] = {"at": time.time(), "remote": request.remote_addr or "", "path": path}
+
+
 def _ui_password() -> str:
     from app.config import process_env
     return process_env("UI_PASSWORD")
@@ -143,6 +157,9 @@ def _require_ui_password():
         given = request.headers.get(DEVICE_TOKEN_HEADER) or request.args.get("token")
         if _same_secret(given, token) or (password and _ui_authorized(password)):
             return None
+        # Nur Geräte merken (falsches Token oder ESP32 ohne Token), nicht den Klick im Browser
+        if given or _is_device_request():
+            _note_device_contact("rejected", path)
         return "Geräte-Token fehlt oder ist falsch.", 401
 
     if not password:
@@ -1299,6 +1316,8 @@ def meta_json():
     # Firmware ab 1.3.0 zieht die Zeit ab dieser Antwort selbst ab (Download,
     # Bildaufbau, ACK): dann nur die Zeit bis zu meta.json einrechnen
     from_meta = request.args.get("sleep", "") == "from_meta"
+    if from_meta or _is_device_request():
+        _note_device_contact("meta", "/meta.json")
     next_wake_sec, next_wake_reason = _suggest_next_wake(state, media_type, from_meta=from_meta)
     from app.device import firmware_info
     payload = {
@@ -1654,6 +1673,25 @@ def api_settings_backup_restore(name: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/device/setup", methods=["GET"])
+def api_device_setup():
+    """Einrichtungskarte: passen die Einstellungen zum Panel, hat sich schon ein Gerät gemeldet oder wird es abgewiesen?"""
+    from app.display_api import device_setup_state
+    return jsonify(device_setup_state(_last_ack, _device_contact, bool(_device_token())))
+
+
+@app.route("/api/device/setup/fix", methods=["POST"])
+def api_device_setup_fix():
+    """Format und Größe (optional auch das Theme) auf das mitgelieferte Panel stellen."""
+    from app.display_api import device_setup_state, panel_fix_updates
+    payload = request.get_json(silent=True) or {}
+    updates = panel_fix_updates(get_cfg(), bool(payload.get("theme")))
+    if updates:
+        _apply_updates_and_render(updates)
+        log_event("settings", "Display-Einstellungen für das Panel übernommen: " + ", ".join(sorted(updates)))
+    return jsonify({"ok": True, "changed": sorted(updates), "setup": device_setup_state(_last_ack, _device_contact, bool(_device_token()))})
+
+
 @app.route("/api/issues", methods=["GET"])
 def api_issues():
     """Statusleiste jeder Seite: Gerät still, Quelle gestört, Firmware wartet, Warnungen – nur aus dem Cache."""
@@ -1663,7 +1701,7 @@ def api_issues():
     expected = _suggest_next_wake(_esp32_state.get("state", "idle"), _esp32_state.get("media_type", "idle"))[0]
     with cache_only():
         issues = build_issues(_esp32_state, _last_ack, expected, _worker_health(),
-                              stale_sources=_stale_sources(env), alerts=_active_alerts(env))
+                              stale_sources=_stale_sources(env), alerts=_active_alerts(env), contact=_device_contact)
     return jsonify({"issues": issues})
 
 
