@@ -627,6 +627,50 @@ def render_garbage_module(services: ModuleRenderServices, content: object, compa
     font_row_type = load_font(lp(28), False)
     row_h = lp(84)
 
+    # Kalender im freien Platz (GARBAGE_CALENDAR): nur im Vollbild, die Kachel hat keinen Platz dafür
+    calendar_days = [] if compact else (data.get("calendar") or [])
+    max_list_rows = 3 if calendar_days else None
+
+    def _draw_calendar(y: int) -> None:
+        rows = [(day, i, ev) for day in calendar_days for i, ev in enumerate(day["events"])]
+        head_h, cal_row_h = lp(48), lp(58)
+        bottom = rh - margin
+        if not rows or bottom - y < head_h + cal_row_h:
+            return
+        draw.text((margin, y), "Kalender", font=font_section, fill=pal["muted"])
+        y += head_h
+        fit = (bottom - y) // cal_row_h
+        shown = rows if len(rows) <= fit else rows[:max(0, fit - 1)]
+        font_cal_date = load_font(lp(26), True)
+        font_cal_time = load_font(lp(22), False)
+        time_x, mark_x, text_x = margin + lp(175), margin + lp(290), margin + lp(312)
+        for day, index, ev in shown:
+            draw.line([(margin, y), (rw - margin, y)], fill=pal["row_line"], width=2 if flat else 1)
+            mid = y + cal_row_h // 2
+            if index == 0:
+                relative = day.get("relative", "")
+                label = relative if relative in ("Heute", "Morgen") else _short_date(day["date"])
+                draw.text((margin, mid), label, font=font_cal_date, fill=pal["text"], anchor="lm")
+            start = ev.get("start")
+            if ev.get("continues"):
+                when = "…"
+            elif ev.get("all_day") or not isinstance(start, datetime):
+                when = "ganztägig"
+            else:
+                when = f"{start:%H:%M}"
+            draw.text((time_x, mid), when, font=font_cal_time, fill=pal["muted"], anchor="lm")
+            mark = pal["bins"].get(ev.get("color", ""), pal["text"])
+            draw.rectangle([(mark_x, mid - lp(15)), (mark_x + lp(8), mid + lp(15))], fill=mark)
+            text = ev.get("summary", "") + (f" · {ev['location']}" if ev.get("location") else "")
+            draw.text((text_x, mid), _ellipsize(draw, text, font_row_type, rw - margin - text_x), font=font_row_type,
+                      fill=pal["text"], anchor="lm")
+            y += cal_row_h
+        if len(shown) < len(rows):
+            more = len(rows) - len(shown)
+            draw.line([(margin, y), (rw - margin, y)], fill=pal["row_line"], width=2 if flat else 1)
+            draw.text((margin, y + lp(12)), f"+ {more} weitere Termin{'e' if more > 1 else ''} im Kalender",
+                      font=font_row_rel, fill=pal["muted"])
+
     def _oneliner() -> None:
         if not upcoming_days or remaining < lp(34):
             return
@@ -648,6 +692,7 @@ def render_garbage_module(services: ModuleRenderServices, content: object, compa
         remaining = rh - margin - y
         # Unter dem Streifen ist oft noch Platz – dann die Termine auch als Zeilen
         if not upcoming_days or remaining < lp(48) + 2 * row_h:
+            _draw_calendar(y)
             return img.convert("RGB")
         heading = "Termine"
 
@@ -663,7 +708,9 @@ def render_garbage_module(services: ModuleRenderServices, content: object, compa
     chip_w, chip_h = lp(30), lp(40)
     text_left = margin + lp(230)
     text_right = rw - margin
-    for day in upcoming_days:
+    for row_index, day in enumerate(upcoming_days):
+        if max_list_rows is not None and row_index >= max_list_rows:
+            break       # der Rest steht im Streifen; der Platz gehört dem Kalender
         groups = _group_events(day["events"])[:4]
         labels = [g["summary"] + (f"  · {_group_note(g)}" if _group_note(g) else "") for g in groups]
         widths = [chip_w + lp(14) + int(draw.textlength(lb, font=font_row_type)) for lb in labels]
@@ -687,4 +734,5 @@ def render_garbage_module(services: ModuleRenderServices, content: object, compa
                 cy += line_h
         y += this_row_h
 
+    _draw_calendar(y + gap_after)
     return img.convert("RGB")

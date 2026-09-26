@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-26
+
+### Added
+
+- Müllabfuhr: the free space below the collection dates can show the next appointments of the Kalender (`GARBAGE_CALENDAR=calendar`, "Freier Platz" on the card) – date, time, colour of the calendar and title, as many as fit, then "+ N weitere Termine im Kalender". The appointments come from the Kalender card (ICS addresses, holidays and school holidays); the Kalender itself does not have to be in the programme. With the calendar on, the list under the week strip keeps to three rows (the strip shows every day anyway); the dashboard tile stays as it is. "Verbindung prüfen" says how many appointments were found
+
 ## [0.6.1] - 2026-09-26
 
 ### Fixed

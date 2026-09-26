@@ -70,6 +70,18 @@ SETTINGS_FIELDS: list[dict] = [
         "help":        "Nur relevant bei zwei oder mehr Kalendern. Spalten lohnen sich, wenn die Adressen meist verschiedene Termine haben.",
     },
     {
+        "name":        "GARBAGE_CALENDAR",
+        "label":       "Freier Platz",
+        "type":        "select",
+        "wide":        False,
+        "default":     "off",
+        "options":     [("off", "Leer lassen"), ("calendar", "Termine aus dem Kalender")],
+        "help":        (
+            "Unter den Abfuhrterminen die nächsten Termine des Kalenders zeigen – aus dessen ICS-Adressen und "
+            "Feiertagen/Ferien (Karte „Kalender“). Der Kalender muss dafür nicht im Programm sein."
+        ),
+    },
+    {
         "name":        "GARBAGE_REMINDER_HOUR",
         "label":       "Erinnerung ab (Uhr)",
         "type":        "number",
@@ -129,6 +141,36 @@ def _hour_setting(env: dict[str, str], key: str, default: int) -> int:
         return default
 
 
+def _calendar_wanted(env: dict[str, str]) -> bool:
+    return str(env.get("GARBAGE_CALENDAR", "") or "off").strip().lower() == "calendar"
+
+
+def _calendar_module():
+    import app.module_registry as registry
+    return registry.get_module_by_id("calendar")
+
+
+def _calendar_days(env: dict[str, str]) -> list[dict]:
+    """
+    Tage mit Terminen aus dem Kalender-Modul (dessen Quellen und Einstellungen),
+    für den freien Platz unter den Abfuhrterminen. Leer ohne Kalender.
+    """
+    calendar = _calendar_module()
+    if calendar is None:
+        return []
+    try:
+        content = calendar.fetch_content(env)
+    except Exception as exc:
+        log.warning(f"Müllabfuhr: Kalender für den freien Platz nicht ladbar: {exc}")
+        return []
+    days = []
+    for day in (content or {}).get("days") or []:
+        events = [ev for ev in day.get("events") or [] if ev.get("summary")]
+        if events:
+            days.append({"date": day["date"], "relative": day.get("relative", ""), "events": events})
+    return days
+
+
 class GarbageModule(InkwallModule):
     MODULE_ID          = "garbage"
     MODULE_NAME        = "Müllabfuhr"
@@ -148,10 +190,13 @@ class GarbageModule(InkwallModule):
     def fetch_content(self, env: dict[str, str]) -> dict | None:
         from .data_source import fetch_garbage_content
         try:
-            return fetch_garbage_content(False)
+            content = fetch_garbage_content(False)
         except Exception as exc:
             log.error(f"GarbageModule.fetch_content: {exc}", exc_info=True)
             return None
+        if content is not None and _calendar_wanted(env):
+            content = {**content, "calendar": _calendar_days(env)}
+        return content
 
     def _render_options(self, env: dict[str, str]) -> dict:
         layout = (env.get("GARBAGE_LAYOUT", "") or "merged").strip().lower()
@@ -174,13 +219,18 @@ class GarbageModule(InkwallModule):
 
     def should_refresh(self, env: dict[str, str]) -> bool:
         from .data_source import should_refresh_garbage
-        return should_refresh_garbage()
+        if should_refresh_garbage():
+            return True
+        # Kalender im freien Platz: dessen Quellen wollen auch neu geladen werden
+        calendar = _calendar_module() if _calendar_wanted(env) else None
+        return bool(calendar and calendar.should_refresh(env))
 
     def is_urgent(self, env: dict[str, str]) -> bool:
         """Abfuhr heute (bis „Erledigt ab“) oder morgen ab „Erinnerung ab“."""
+        from .data_source import fetch_garbage_content
         if not self.is_enabled(env):
             return False
-        content = self.fetch_content(env)
+        content = fetch_garbage_content(False)
         return bool(content and content.get("urgent"))
 
     def get_state_key(self, content: Any) -> str:
@@ -189,7 +239,13 @@ class GarbageModule(InkwallModule):
             nxt = content.get("next") or {}
             names = ",".join(ev.get("summary", "") for ev in nxt.get("events", []))
             flags = ("urgent" if content.get("urgent") else "") + ("stale" if content.get("stale_since") else "")
-            return f"{content.get('today', '')}:{nxt.get('date', '')}:{names}:{flags}"
+            key = f"{content.get('today', '')}:{nxt.get('date', '')}:{names}:{flags}"
+            if content.get("calendar"):
+                # Neue oder vergangene Kalendertermine → neues Bild
+                import hashlib
+                parts = [f"{d['date']}|{ev.get('summary', '')}|{ev.get('start')}" for d in content["calendar"] for ev in d["events"]]
+                key += ":cal" + hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()[:10]
+            return key
         return "garbage"
 
     def get_runtime_summary(self, env: dict[str, str]) -> dict[str, str]:
@@ -260,6 +316,15 @@ class GarbageModule(InkwallModule):
             details.append(f"Kalender {', '.join(str(y) for y in content['missing_years'])} antwortet mit 404 – noch nicht online.")
         if content.get("stale_since"):
             details.append("Achtung: Die Quelle ist gerade nicht erreichbar, gezeigt wird der letzte gespeicherte Stand.")
+        if _calendar_wanted(env):
+            calendar_days = _calendar_days(env)
+            n = sum(len(d["events"]) for d in calendar_days)
+            if n:
+                details.append(f"Freier Platz: {n} Kalendertermine (so viele wie passen).")
+            elif _calendar_module() is None:
+                details.append("Freier Platz: das Kalender-Modul fehlt.")
+            else:
+                details.append("Freier Platz: keine Kalendertermine – ICS-Adresse oder Feiertage in der Karte „Kalender“ einrichten.")
         if not days and content.get("missing_years"):
             return {"ok": False, "message": "Keine Termine – der Jahreskalender ist noch nicht online", "details": details}
         return {
