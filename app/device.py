@@ -224,8 +224,9 @@ def consume_test_banner() -> bool:
 # ---------------------------------------------------------------------------
 
 _INT_FIELDS = ("rssi", "boot_count", "free_psram_kb", "cycle_ms", "download_ms", "refresh_ms", "cleaned", "offline_s",
-               "meta_ms")
-_STR_FIELDS = ("device_id", "hash", "fw_version", "result", "error", "image_format", "wake_reason", "reset_reason", "ip")
+               "meta_ms", "last_phase_ms", "last_phase_boot")
+_STR_FIELDS = ("device_id", "hash", "fw_version", "result", "error", "image_format", "wake_reason", "reset_reason", "ip",
+               "last_phase")
 
 # Warum der Chip gestartet ist (Firmware ab 1.3.0). Nur die Abstürze sind ein Ereignis wert.
 RESET_LABELS = {
@@ -240,6 +241,35 @@ RESET_LABELS = {
     "deepsleep": "Aufwachen",
 }
 CRASH_RESETS = frozenset({"panic", "task_wdt", "int_wdt", "wdt", "brownout"})
+
+# Firmware ab 1.3.2: in welchem Arbeitsschritt der vorige Start ungeplant endete (last_phase)
+PHASE_LABELS = {
+    "start": "beim Start",
+    "wifi": "beim WLAN-Aufbau",
+    "meta": "bei der Abfrage beim Server",
+    "ota": "beim Firmware-Update",
+    "clean": "bei der Panelreinigung",
+    "banner": "beim Zeichnen eines Hinweises",
+    "download": "beim Bild-Download",
+    "display": "beim Bildaufbau am Panel",
+    "flash": "beim Speichern im Flash",
+    "ack": "bei der Rückmeldung",
+    "sleep": "beim Einschlafen",
+}
+
+
+def crash_text(ack: dict) -> str:
+    """'Unterspannung beim Bildaufbau am Panel (Start #229)' – leer ohne ungeplanten Neustart."""
+    reason = str(ack.get("reset_reason", "") or "")
+    if reason not in CRASH_RESETS:
+        return ""
+    text = RESET_LABELS.get(reason, reason)
+    phase = str(ack.get("last_phase", "") or "")
+    if phase:
+        text += " " + PHASE_LABELS.get(phase, f"im Schritt „{phase}“")
+        if isinstance(ack.get("last_phase_boot"), int):
+            text += f" (Start #{ack['last_phase_boot']})"
+    return text
 
 
 def normalize_ack(body: dict, remote: str | None) -> dict:

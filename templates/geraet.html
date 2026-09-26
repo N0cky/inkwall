@@ -299,6 +299,18 @@ details[open] summary { margin-bottom: 8px; }
         return Math.round(s / 86400) + ' Tage';
     }
 
+    // Kurzformen für Verlauf und Kennzahl (ausführlich: app/device.py RESET_LABELS, PHASE_LABELS)
+    var RESET_TEXT = { brownout: 'Unterspannung', panic: 'Absturz', task_wdt: 'Watchdog', int_wdt: 'Watchdog', wdt: 'Watchdog' };
+    var PHASE_TEXT = { start: 'beim Start', wifi: 'beim WLAN-Aufbau', meta: 'bei der Server-Abfrage', ota: 'beim Update',
+        clean: 'bei der Reinigung', banner: 'beim Hinweis', download: 'beim Download', display: 'beim Bildaufbau',
+        flash: 'beim Speichern im Flash', ack: 'bei der Rückmeldung', sleep: 'beim Einschlafen' };
+    function crashPhases(st) {
+        var phases = st.crash_phases || {};
+        var parts = Object.keys(phases).sort(function (a, b) { return phases[b] - phases[a]; })
+            .map(function (p) { return phases[p] + '× ' + (PHASE_TEXT[p] || p); });
+        return parts.length ? ' · ' + parts.join(', ') : '';
+    }
+
     function stat(n, l, cls) { return '<div class="stat"><div class="n' + (cls ? ' ' + cls : '') + '">' + n + '</div><div class="l">' + esc(l) + '</div></div>'; }
 
     function chartSvg(entries, expected) {
@@ -358,13 +370,15 @@ details[open] summary { margin-bottom: 8px; }
                 + stat(st.avg_cycle_ms != null ? (st.avg_cycle_ms / 1000).toFixed(1) + ' s' : '–', 'Ø Zyklus' + (st.max_cycle_ms != null ? ' · max ' + (st.max_cycle_ms / 1000).toFixed(1) + ' s' : ''))
                 + stat(st.rssi_min != null ? st.rssi_min + ' dBm' : '–', 'WLAN schwächstes' + (st.rssi_avg != null ? ' · Ø ' + st.rssi_avg : ''))
                 + stat(st.errors, 'Fehlermeldungen', st.errors ? 'warn-text' : '')
+                + stat(st.crashes || 0, 'Neustarts (Unterspannung, Absturz)' + crashPhases(st), st.crashes ? 'warn-text' : '')
                 + '</div>' + chartSvg(entries, h.expected_seconds)
                 + '<div class="hint" style="margin-top:6px">Linie: WLAN-Signal in dBm (oben = besser), Balken: Zyklusdauer, rote Punkte: Fehler. Lücken in der Linie sind Pausen über dem Dreifachen des Takts.</div>';
             var last = entries.slice(-10).reverse();
             html += '<div class="table-scroll"><table class="acks"><tr><th>Zeit</th><th>Ergebnis</th><th class="r">WLAN</th><th class="r">Zyklus</th><th class="r">Download</th><th class="r">Anzeige</th></tr>'
                 + last.map(function (e) {
+                    var crashChip = e.reset ? ' <span class="chip warn" title="' + esc('Vorher neu gestartet: ' + (RESET_TEXT[e.reset] || e.reset) + (e.phase ? ' ' + (PHASE_TEXT[e.phase] || e.phase) : '')) + '">' + esc(RESET_TEXT[e.reset] || e.reset) + '</span>' : '';
                     var res = e.result === 'updated' ? '<span class="chip ok">neues Bild</span>' : e.result === 'unchanged' ? '<span class="chip">unverändert</span>' : e.result === 'error' ? '<span class="chip danger" title="' + esc(e.error || '') + '">Fehler</span>' : '<span class="chip">' + esc(e.result) + '</span>';
-                    return '<tr><td>' + esc(ui.fmtDateTime(e.t)) + '</td><td>' + res + '</td><td class="r">' + (e.rssi != null ? esc(e.rssi + ' dBm') : '–') + '</td><td class="r">' + (e.cycle_ms != null ? (e.cycle_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.download_ms != null ? (e.download_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.refresh_ms != null ? (e.refresh_ms / 1000).toFixed(1) + ' s' : '–') + '</td></tr>';
+                    return '<tr><td>' + esc(ui.fmtDateTime(e.t)) + '</td><td>' + res + crashChip + '</td><td class="r">' + (e.rssi != null ? esc(e.rssi + ' dBm') : '–') + '</td><td class="r">' + (e.cycle_ms != null ? (e.cycle_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.download_ms != null ? (e.download_ms / 1000).toFixed(1) + ' s' : '–') + '</td><td class="r">' + (e.refresh_ms != null ? (e.refresh_ms / 1000).toFixed(1) + ' s' : '–') + '</td></tr>';
                 }).join('') + '</table></div>';
             box.innerHTML = html;
         } catch (e) { box.innerHTML = '<div class="hint">Verlauf nicht ladbar.</div>'; throw e; }
@@ -405,7 +419,8 @@ details[open] summary { margin-bottom: 8px; }
                 }
                 if (d.reset_reason && d.reset_reason !== 'deepsleep') {
                     var crash = ['panic', 'task_wdt', 'int_wdt', 'wdt', 'brownout'].indexOf(d.reset_reason) >= 0;
-                    html += kv('Letzter Start', esc(d.reset_label || d.reset_reason) + (crash ? ' <span class="chip warn">Absturz</span>' : ''));
+                    html += kv('Letzter Start', esc(d.crash_text || d.reset_label || d.reset_reason)
+                        + (crash ? ' <span class="chip warn">' + (d.reset_reason === 'brownout' ? 'Stromversorgung' : 'Absturz') + '</span>' : ''));
                 }
                 if (d.free_psram_kb != null) html += kv('Freier PSRAM', esc(Math.round(d.free_psram_kb / 1024) + ' MB') + (d.boot_count != null ? ' <span class="hint">· Boot #' + esc(d.boot_count) + '</span>' : ''));
                 if (s.panel) {

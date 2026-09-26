@@ -58,9 +58,9 @@
 // Der Server liest die Version aus dem Marker in der .bin (Gerät-Seite → Firmware).
 // Der Marker wird im Boot-Log referenziert, sonst wirft der Linker ihn weg.
 #ifdef OTA_SELFTEST_FAIL
-#define FIRMWARE_VERSION "1.3.1-selftest"
+#define FIRMWARE_VERSION "1.3.2-selftest"
 #else
-#define FIRMWARE_VERSION "1.3.1"
+#define FIRMWARE_VERSION "1.3.2"
 #endif
 #define FW_MARKER_PREFIX "INKWALL_FW_VERSION="
 const char FW_VERSION_MARKER[] __attribute__((used)) = FW_MARKER_PREFIX FIRMWARE_VERSION;
@@ -72,6 +72,15 @@ static const char* firmwareVersionFromMarker() { return FW_VERSION_MARKER + size
 // weg (unnötiger Bildaufbau, Offline-Balken begann von vorn, Fehler verloren).
 // RTC_NOINIT überlebt jeden Reset außer Stromausfall; Kennung und Prüfsumme
 // erkennen den Datenmüll nach dem Einschalten oder einer neuen Firmware.
+// Diagnose-Spur (siehe unten): letzter begonnener Arbeitsschritt, eigene Kennung und Prüfsumme
+struct PhaseTrace {
+    uint32_t magic;
+    uint32_t boot;      // Boot-Zähler des Starts, der den Schritt begann
+    uint32_t atMs;      // millis() beim Beginn des Schritts
+    uint32_t phase;
+    uint32_t crc;
+};
+
 struct PersistState {
     uint32_t magic;
     char     storedHash[33];     // Hash des Bilds auf dem Panel ("" = unbekannt/Statusbild)
@@ -86,6 +95,8 @@ struct PersistState {
     int32_t  tzOffsetSec;        // vom Server, für "seit HH:MM"
     char     lastError[96];      // Fehler eines Zyklus ohne ACK (z. B. WLAN weg)
     uint32_t crc;
+    // Hinter crc: gehört nicht zur Prüfsumme des Zustands (ab 1.3.2, ältere Stände bleiben gültig)
+    PhaseTrace trace;
 };
 static const uint32_t PERSIST_MAGIC = 0x494E4B33;   // "INK3"
 RTC_NOINIT_ATTR static PersistState g_persist;
@@ -123,9 +134,54 @@ static bool persistLoad() {
         g_persist.lastError[95] = 0;
         return true;
     }
+    PhaseTrace trace = g_persist.trace;   // Diagnose-Spur hat eine eigene Prüfsumme, nicht mit wegwerfen
     memset(&g_persist, 0, sizeof(g_persist));
+    g_persist.trace = trace;
     persistSave();
     return false;
+}
+
+// ── Diagnose: in welchem Schritt endete der letzte Start? ────────────────────
+// Bricht die Versorgung ein (Brownout) oder stürzt der Chip ab, steht der
+// zuletzt begonnene Schritt noch im RTC-Speicher (überlebt wie g_persist jeden
+// Reset außer Stromausfall). Der nächste Start meldet ihn mit dem ACK – so wird
+// sichtbar, ob WLAN, Bildaufbau oder das Speichern im Flash die Spannung einbrechen lässt.
+enum Phase : uint8_t { PH_NONE = 0, PH_START, PH_WIFI, PH_META, PH_OTA, PH_CLEAN, PH_BANNER,
+                       PH_DOWNLOAD, PH_DISPLAY, PH_FLASH, PH_ACK, PH_SLEEP, PH_COUNT };
+static const char* const PHASE_NAMES[PH_COUNT] = { "", "start", "wifi", "meta", "ota", "clean", "banner",
+                                                   "download", "display", "flash", "ack", "sleep" };
+static const uint32_t TRACE_MAGIC = 0x50485332;   // "PHS2"
+static PhaseTrace& g_trace = g_persist.trace;     // liegt in g_persist, dort hinter der Prüfsumme
+static const char* g_lastPhase = nullptr;         // nur nach Unterspannung, Absturz oder Watchdog gesetzt
+static uint32_t g_lastPhaseMs = 0;
+static uint32_t g_lastPhaseBoot = 0;
+
+static uint32_t traceChecksum() {
+    const uint8_t* p = (const uint8_t*)&g_trace;
+    uint32_t h = 2166136261u;                              // FNV-1a wie g_persist
+    for (size_t i = 0; i < offsetof(PhaseTrace, crc); i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+static void setPhase(uint8_t phase) {      // uint8_t statt Phase: Arduino setzt Prototypen vor die enum-Definition
+    g_trace.magic = TRACE_MAGIC;
+    g_trace.boot = bootCount;
+    g_trace.atMs = millis();
+    g_trace.phase = phase;
+    g_trace.crc = traceChecksum();
+}
+
+// Beim Start: endete der vorige Lauf ungeplant, dessen letzten Schritt übernehmen
+static void traceLoad() {
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool abnormal = rr == ESP_RST_BROWNOUT || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT
+                 || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
+    if (abnormal && g_trace.magic == TRACE_MAGIC && g_trace.crc == traceChecksum()
+        && g_trace.phase > PH_NONE && g_trace.phase < PH_COUNT) {
+        g_lastPhase = PHASE_NAMES[g_trace.phase];
+        g_lastPhaseMs = g_trace.atMs;
+        g_lastPhaseBoot = g_trace.boot;
+    }
 }
 
 static const uint32_t OFFLINE_AFTER_FAILS = 3;         // 3 × 5 min = 15 min
@@ -297,6 +353,8 @@ void setup() {
     bool persisted = persistLoad();
     bootCount++;
     persistSave();
+    traceLoad();              // Schritt, in dem der vorige Start ungeplant endete
+    setPhase(PH_START);
 
     // Watchdog: haengt eine Phase (WLAN, Download, Panel, Flash) laenger als
     // 5 Minuten, startet der Chip neu statt fuer immer wach zu bleiben. Zwischen
@@ -309,6 +367,10 @@ void setup() {
     logf("== Inkwall %s Boot #%lu (Wecken: %s, Start: %s) ==", firmwareVersionFromMarker(), (unsigned long)bootCount,
          wakeReasonText(), resetReasonText());
     if (!persisted) logf("[RTC] Kein Zustand aus dem letzten Lauf (Stromausfall oder neue Firmware)");
+    if (g_lastPhase) {
+        logf("[Diag] Start #%lu endete ungeplant (%s) im Schritt '%s', der %lu ms nach dem Start begann",
+             (unsigned long)g_lastPhaseBoot, resetReasonText(), g_lastPhase, (unsigned long)g_lastPhaseMs);
+    }
     logf("PSRAM frei: %u KB", heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
     {
         // Welcher App-Slot laeuft, und in welchem OTA-Zustand sind beide Slots?
@@ -414,6 +476,7 @@ void setup() {
         goSleep(POLL_FALLBACK_SEC);
     }
 
+    setPhase(PH_WIFI);
     if (!connectWiFi()) {
         logf("[WARN] WiFi failed -> Fallback-Sleep");
         setError("WLAN nicht erreichbar");
@@ -423,6 +486,7 @@ void setup() {
     feedWatchdog();
 
     // ── Meta (Hash, Wake, Bildformat, Firmware, Uhrzeit, Reinigung) ──────────
+    setPhase(PH_META);
     Meta meta;
     if (!fetchMeta(meta)) {
         // Alter Server ohne meta.json? Notfalls nur den Hash holen.
@@ -504,6 +568,7 @@ void setup() {
         } else {
             logf("[OTA] Server bietet %s an, laufend ist %s -> Update%s", meta.firmwareVersion.c_str(), FIRMWARE_VERSION,
                  cmp <= 0 ? " (erzwungen)" : "");
+            setPhase(PH_OTA);
             performOta(meta, tryId);   // startet bei Erfolg neu; sonst laeuft der Zyklus normal weiter
         }
     }
@@ -511,6 +576,7 @@ void setup() {
 
     // ── Panelreinigung ───────────────────────────────────────────────────────
     if (meta.cleanDue) {
+        setPhase(PH_CLEAN);
         if (runCleanCycle()) {
             g_cleaned = 1;
         } else {
@@ -838,6 +904,7 @@ static String readShown() {
 
 // Schwarzer Balken oben auf dem letzten Bild (oder auf Weiß, wenn keins da ist)
 static void showOfflineBanner(bool wifiFailed, bool test) {
+    setPhase(PH_BANNER);
     uint8_t* fb = (uint8_t*)heap_caps_malloc(EPD_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!fb) { logf("[ERR] PSRAM fuer Offline-Bild fehlt"); return; }
     int64_t imageEpoch = 0;
@@ -876,6 +943,7 @@ static void showOfflineBanner(bool wifiFailed, bool test) {
 
 // Weiße Seite mit Hinweis, wenn WLAN oder Server nicht konfiguriert sind
 static void showSetupPage() {
+    setPhase(PH_BANNER);
     uint8_t* fb = (uint8_t*)heap_caps_malloc(EPD_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!fb) return;
     fbFill(fb, EPD_COLOR_WHITE);
@@ -1296,6 +1364,7 @@ bool fetchAndDisplayEpd(const String& path, const char* hash) {
         return false;
     }
 
+    setPhase(PH_DOWNLOAD);
     uint32_t t = millis();
     size_t len = 0;
     if (!httpGetBinary(url, buf, BUF_SIZE, len)) {
@@ -1323,6 +1392,7 @@ bool fetchAndDisplayEpd(const String& path, const char* hash) {
     t = millis();
     feedWatchdog();
     persistSave();
+    setPhase(PH_DISPLAY);
     EPD_Init();
     logf("[EPD] Sende kompaktes Bild an Display...");
     bool panelOk = EPD_Display(buf + EPD_HEADER_SIZE);
@@ -1333,6 +1403,7 @@ bool fetchAndDisplayEpd(const String& path, const char* hash) {
         heap_caps_free(buf);
         return panelFailed();
     }
+    setPhase(PH_FLASH);
     saveLastImage(buf + EPD_HEADER_SIZE, hash);
     heap_caps_free(buf);
     logf("[EPD] Fertig!");
@@ -1407,6 +1478,7 @@ bool fetchAndDisplayBmp(const char* hash) {
         return false;
     }
 
+    setPhase(PH_DOWNLOAD);
     uint32_t t = millis();
     size_t bmpLen = 0;
     if (!httpGetBinary(String(SERVER_BASE_URL) + "/current.bmp",
@@ -1432,6 +1504,7 @@ bool fetchAndDisplayBmp(const char* hash) {
     bool     bottomUp  = (imgH > 0);
 
     t = millis();
+    setPhase(PH_DISPLAY);
     EPD_Init();
 
     uint8_t* epdBuf = (uint8_t*)heap_caps_malloc(EPD_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -1469,6 +1542,7 @@ bool fetchAndDisplayBmp(const char* hash) {
         heap_caps_free(epdBuf);
         return panelFailed();
     }
+    setPhase(PH_FLASH);
     saveLastImage(epdBuf, hash);
 
     heap_caps_free(epdBuf);
@@ -1481,6 +1555,7 @@ bool fetchAndDisplayBmp(const char* hash) {
 //  ACK – Ergebnis, Gesundheitsdaten und Log
 // ════════════════════════════════════════════════════════════════════════════
 bool sendAck(const char* result, const char* hash, const char* fwTarget) {
+    setPhase(PH_ACK);
     String body;
     body.reserve(g_log.length() + 512);
     body += "{\"device_id\":\""; body += jsonEscape(DEVICE_ID);
@@ -1498,6 +1573,11 @@ bool sendAck(const char* result, const char* hash, const char* fwTarget) {
     if (!g_imageFormat.isEmpty()) { body += ",\"image_format\":\""; body += g_imageFormat; body += "\""; }
     body += ",\"wake_reason\":\""; body += wakeReasonText(); body += "\"";
     body += ",\"reset_reason\":\""; body += resetReasonText(); body += "\"";
+    if (g_lastPhase) {
+        body += ",\"last_phase\":\""; body += g_lastPhase; body += "\"";
+        body += ",\"last_phase_ms\":";   body += String((unsigned long)g_lastPhaseMs);
+        body += ",\"last_phase_boot\":"; body += String((unsigned long)g_lastPhaseBoot);
+    }
     if (g_metaAtMs) { body += ",\"meta_ms\":"; body += String((unsigned long)g_metaAtMs); }
     if (g_cleaned)        { body += ",\"cleaned\":1"; }
     if (g_offlineSeconds) { body += ",\"offline_s\":"; body += String((unsigned long)g_offlineSeconds); }
@@ -1547,6 +1627,7 @@ void goSleep(uint32_t seconds) {
     Serial.printf("[Sleep] Deep Sleep fuer %lu s\n", (unsigned long)seconds);
     Serial.flush();
     EPD_Sleep();
+    setPhase(PH_SLEEP);
     esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
     esp_deep_sleep_start();
 }

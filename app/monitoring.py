@@ -83,6 +83,12 @@ def record_ack(ack: dict, hash_matches: bool | None = None) -> dict:
         entry["fw"] = str(ack["fw_version"])[:32]
     if ack.get("error"):
         entry["error"] = str(ack["error"])[:80]
+    # Ungeplanter Neustart vor diesem Zyklus (Unterspannung, Absturz) und – ab Firmware 1.3.2 – der Schritt
+    from app.device import CRASH_RESETS
+    if ack.get("reset_reason") in CRASH_RESETS:
+        entry["reset"] = str(ack["reset_reason"])[:20]
+        if ack.get("last_phase"):
+            entry["phase"] = str(ack["last_phase"])[:20]
     if hash_matches is not None:
         entry["match"] = bool(hash_matches)
     with _lock:
@@ -179,7 +185,18 @@ def ack_stats(entries: list[dict], expected_seconds: int = DEFAULT_EXPECTED_SECO
         "rssi_min": min(rssis) if rssis else None,
         "rssi_avg": int(sum(rssis) / len(rssis)) if rssis else None,
         "rssi_last": rssis[-1] if rssis else None,
+        # Ungeplante Neustarts je Art und je Arbeitsschritt (Diagnose der Stromversorgung)
+        "crashes": sum(1 for e in entries if e.get("reset")),
+        "crash_reasons": _count(e.get("reset") for e in entries if e.get("reset")),
+        "crash_phases": _count(e.get("phase") for e in entries if e.get("reset") and e.get("phase")),
     }
+
+
+def _count(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------

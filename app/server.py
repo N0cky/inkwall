@@ -1423,7 +1423,9 @@ def ack():
     from app.device import CRASH_RESETS, RESET_LABELS
     reset_reason = ack_data.get("reset_reason", "")
     if reset_reason in CRASH_RESETS:
-        log_event("device", f"Gerät {device} ist neu gestartet: {RESET_LABELS.get(reset_reason, reset_reason)}", logging.WARNING)
+        from app.device import crash_text
+        log_event("device", f"Gerät {device} ist neu gestartet: {crash_text(ack_data) or RESET_LABELS.get(reset_reason, reset_reason)}",
+                  logging.WARNING)
     rssi = ack_data.get("rssi")
     if isinstance(rssi, int) and rssi < -82:
         log_event("device", f"Gerät {device}: WLAN sehr schwach ({rssi} dBm)", logging.WARNING)

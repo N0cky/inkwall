@@ -5,7 +5,7 @@ Das Geraet verbindet sich per WLAN mit dem Inkwall-Server, prueft per Hash auf
 neue Inhalte, laedt bei Bedarf das Bild, zeigt es an, meldet sich zurueck und geht
 anschliessend wieder in den Deep Sleep.
 
-Version: `1.3.1` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
+Version: `1.3.2` (siehe `FIRMWARE_VERSION` in `Inkwall.ino`).
 
 ## Features
 
@@ -133,10 +133,19 @@ System-Seite gedacht; wer am USB-Port mitlesen will, setzt "USB CDC On Boot: Ena
   "wake_reason": "timer",
   "reset_reason": "deepsleep | poweron | panic | task_wdt | brownout | restart | …",
   "meta_ms": 5200,
+  "last_phase": "display", "last_phase_ms": 14210, "last_phase_boot": 229,
   "error": "…nur bei result=error…",
   "log": ["== Inkwall 1.3.0 Boot #123 (Wecken: timer, Start: deepsleep) ==", "…"]
 }
 ```
+
+`last_phase*` (ab 1.3.2) nur nach einem ungeplanten Neustart (Unterspannung, Absturz, Watchdog):
+der Arbeitsschritt, in dem der vorige Start endete (`start`, `wifi`, `meta`, `ota`, `clean`,
+`banner`, `download`, `display`, `flash`, `ack`, `sleep`), wann er begann (ms nach dem Start) und
+dessen Boot-Nummer. Die Firmware merkt sich den laufenden Schritt im RTC-Speicher (am Ende von
+`PersistState`, hinter dessen Prüfsumme, mit eigener Kennung und Prüfsumme) – der überlebt einen
+Brownout. Der Server zeigt daraus z. B. „Unterspannung beim Bildaufbau am Panel“ und zählt die
+Neustarts je Schritt im Verlauf auf der Gerät-Seite.
 
 ## Offline-Verhalten
 

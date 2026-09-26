@@ -225,7 +225,7 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
     from app.holidays import school_holiday_checker
     active, seconds_until_change, upcoming = active_window(windows, now_local(), school_holiday_checker(windows)) if windows else (None, 0, None)
 
-    from app.device import RESET_LABELS, firmware_info, firmware_update_expected, last_clean_at, rssi_quality, test_banner_pending
+    from app.device import RESET_LABELS, crash_text, firmware_info, firmware_update_expected, last_clean_at, rssi_quality, test_banner_pending
     fw = firmware_info()
     last_clean = last_clean_at()
     device_fw = str(last_ack.get("fw_version", "") or "")
@@ -310,6 +310,7 @@ def build_display_state(esp32_state: dict, last_ack: dict, next_wake: tuple[int,
             "wake_reason":      str(last_ack.get("wake_reason", "") or ""),
             "reset_reason":     str(last_ack.get("reset_reason", "") or ""),
             "reset_label":      RESET_LABELS.get(str(last_ack.get("reset_reason", "") or ""), ""),
+            "crash_text":       crash_text(last_ack),
             "ip":               str(last_ack.get("ip", "") or ""),
         },
         "content": [_module_entry(m, env, active_id, tiles) for m in ordered],

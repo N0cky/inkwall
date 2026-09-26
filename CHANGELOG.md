@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Added
+
+- Firmware 1.3.2: the device remembers the step it is working on (Wi-Fi, server request, download, drawing on the panel, saving to flash, report, …) in RTC memory, which survives a brownout. After a restart caused by undervoltage, a crash or the watchdog it reports that step with the next acknowledgement (`last_phase`, `last_phase_ms`, `last_phase_boot`) and logs it (`[Diag] Start #229 endete ungeplant (brownout) im Schritt 'display' …`). The trace sits at the end of the persisted state behind its checksum, so the update from 1.3.1 keeps boot count and image hash
+- The server shows it: the event reads "Gerät … ist neu gestartet: Unterspannung beim Bildaufbau am Panel (Start #229)", the *Gerät* page shows it under "Letzter Start" (marked "Stromversorgung" for a brownout), the acknowledgement history marks the cycle after an unplanned restart, and the statistics count these restarts per step ("Neustarts (Unterspannung, Absturz) · 2× beim Bildaufbau, 1× beim WLAN-Aufbau")
+
 ## [0.7.0] - 2026-09-26
 
 ### Added
