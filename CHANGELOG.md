@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-26
+
+### Added
+
+- Status strip on every page: the display has not reported for longer than three wake intervals (at least 15 min) or reports an error, the server's render worker hangs, a firmware update is waiting, the display settings would keep the panel from getting an image, a content in the programme is not ready or shows old data because its source is down, a NINA or severe weather warning is active. Each line links to the page that helps; the strip is hidden when all is well, refreshes every minute and says so when the server is unreachable (`/api/issues`)
+- Settings history: before every change of `settings.env` the previous state is kept in `backups/` next to it (`/config/backups` in the container, the last 30, an unchanged state is not stored twice). The *System* page lists them with the settings that changed since – names only, no values – and brings one back after a confirmation; the current state is kept first, so bringing one back can be undone (`/api/settings/backups`)
+
 ## [0.4.0] - 2026-09-26
 
 ### Added

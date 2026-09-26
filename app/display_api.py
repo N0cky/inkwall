@@ -581,6 +581,88 @@ def _all_known_fields() -> list[dict]:
     return fields
 
 
+def field_labels() -> dict[str, str]:
+    """Settings-Key → Beschriftung in der Oberfläche (für „Frühere Stände“)."""
+    return {f["name"]: str(f.get("label") or f["name"]) for f in _all_known_fields()}
+
+
+# ---------------------------------------------------------------------------
+# Statusleiste: was gerade Aufmerksamkeit braucht (jede Seite, alle 60 s)
+# ---------------------------------------------------------------------------
+
+def _duration(seconds: int) -> str:
+    if seconds < 7200:
+        return f"{max(1, round(seconds / 60))} min"
+    if seconds < 2 * 86400:
+        return f"{round(seconds / 3600)} h"
+    return f"{round(seconds / 86400)} Tagen"
+
+
+def build_issues(esp32_state: dict, last_ack: dict, expected_seconds: int, worker: dict,
+                 stale_sources: list | None = None, alerts: list | None = None) -> list[dict]:
+    """
+    [{"level": "danger" | "warn" | "info", "text", "href"}, …] – leer, wenn alles läuft.
+    Nur aus Speicher und Cache (der Aufrufer schaltet cache_only ein).
+    """
+    issues: list[dict] = []
+    cfg = get_cfg()
+    env = get_settings_values()
+
+    if not worker.get("ok", True):
+        issues.append({"level": "danger", "href": "/system",
+                       "text": "Der Server erzeugt keine neuen Bilder mehr (Render-Worker hängt) – Container neu starten."})
+
+    # Gerät
+    ack_raw = str(last_ack.get("ack_at", "") or "")
+    if ack_raw:
+        try:
+            ack_at = datetime.fromisoformat(ack_raw.replace("Z", "+00:00"))
+            age = int((datetime.now(timezone.utc) - ack_at).total_seconds())
+        except ValueError:
+            age = None
+        limit = max(3 * int(expected_seconds or 0), 900)
+        if age is not None and age > limit:
+            issues.append({"level": "danger", "href": "/geraet", "text": f"Das Display hat sich seit {_duration(age)} nicht gemeldet."})
+        elif last_ack.get("result") == "error":
+            issues.append({"level": "warn", "href": "/geraet",
+                           "text": f"Das Display meldet einen Fehler: {str(last_ack.get('error') or 'ohne Beschreibung')[:120]}"})
+        from app.device import firmware_info, firmware_update_expected
+        fw = firmware_info()
+        device_fw = str(last_ack.get("fw_version", "") or "")
+        if firmware_update_expected(fw, device_fw):
+            issues.append({"level": "info", "href": "/geraet", "text": f"Firmware {fw['version']} wartet auf das Display (läuft: {device_fw})."})
+        if device_fw:
+            for text in panel_setup_issues(cfg):
+                issues.append({"level": "warn", "href": "/geraet", "text": text})
+
+    # Inhalte im Programm: eingeschaltet, aber nicht einsatzbereit oder nur mit altem Stand.
+    # Live-Inhalte (Plex, Steam) nicht: die sind oft an, ohne eingerichtet zu sein, und ihr
+    # Status steht auf der Anzeige-Seite
+    stale_by_id = {mid: (name, since) for mid, name, since in (stale_sources or [])}
+    for mod in _registry.get_idle_modules():
+        try:
+            if not _module_enabled(mod, env):
+                continue
+        except Exception:
+            continue
+        status = _safe(lambda: mod.describe_status(env), {"state": "ready", "reason": ""})
+        href = f"/inhalte#{mod.MODULE_ID}"
+        if status.get("state") in ("error", "missing"):
+            level = "warn"
+            issues.append({"level": level, "href": href, "text": f"{mod.MODULE_NAME}: {status.get('reason') or 'nicht bereit'}"})
+        elif mod.MODULE_ID in stale_by_id:
+            name, since = stale_by_id[mod.MODULE_ID]
+            issues.append({"level": "warn", "href": href,
+                           "text": f"{name}: Quelle nicht erreichbar, gezeigt wird der Stand vom {since:%d.%m. %H:%M}."})
+
+    # Warnungen (Unwetter, NINA)
+    for alert in alerts or []:
+        severe = alert.get("severity") in ("severe", "extreme")
+        issues.append({"level": "danger" if severe else "info", "href": "/",
+                       "text": f"Warnung: {str(alert.get('title') or '')[:140]}"})
+    return issues
+
+
 def secret_field_names() -> set[str]:
     """Passwort-Felder und Felder mit "secret": True (Webhook-Adresse, private Kalender-Links …)."""
     return {f["name"] for f in _all_known_fields() if f.get("type") == "password" or f.get("secret")}

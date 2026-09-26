@@ -315,7 +315,11 @@ class ConfigIsolationTest(unittest.TestCase):
                 values = config.read_env_settings()
             self.assertEqual({k: v for k, v in values.items() if k.startswith("ZZ_KEY_")}, {f"ZZ_KEY_{i}": str(i) for i in range(12)})
             self.assertEqual(values["DISPLAY_THEME"], "dark")
-            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["settings.env"], "keine Temp-Dateien übrig")
+            # Neben der Datei nur der Ordner mit den früheren Ständen – und nirgends Temp-Dateien
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["backups", "settings.env"])
+            backups = list((Path(tmp) / "backups").iterdir())
+            self.assertFalse([p.name for p in backups if not p.name.endswith(".env")], "keine Temp-Dateien übrig")
+            self.assertEqual(len(backups), 12, "je Änderung ein früherer Stand")
 
 
 # ---------------------------------------------------------------------------

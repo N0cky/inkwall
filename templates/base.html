@@ -183,6 +183,13 @@
         .page-content {
             padding: 28px;
         }
+        /* Statusleiste: was gerade Aufmerksamkeit braucht, auf jeder Seite (leer = verborgen) */
+        .issue-strip { display: grid; gap: 6px; padding: 10px 28px; border-bottom: 1px solid var(--border); background: var(--surface3); }
+        .issue { display: flex; gap: 10px; align-items: baseline; font-size: 13px; font-weight: 700; color: var(--text); text-decoration: none; }
+        .issue .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--accent); }
+        .issue.danger .dot { background: var(--danger); }
+        .issue.warn .dot { background: var(--warn); }
+        a.issue:hover .text { text-decoration: underline; }
         .section-label {
             font-size: 10.5px;
             font-weight: 800;
@@ -341,6 +348,7 @@
             body { padding: 8px 8px 32px; }
             .topbar { padding: 14px 16px; }
             .page-content { padding: 18px 16px; }
+            .issue-strip { padding: 10px 16px; }
             .nav-links { width: 100%; }
             .savebar { bottom: 8px; }
         }
@@ -377,6 +385,8 @@
         </div>
     </header>
 
+    <div class="issue-strip" id="issueStrip" role="status" aria-live="polite" hidden></div>
+
     <main class="page-content">
         {% block content %}{% endblock %}
     </main>
@@ -384,6 +394,33 @@
 
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
 <script src="{{ url_for('static', filename='fields.js') }}"></script>
+<script>
+/* Statusleiste: Gerät still, Quelle gestört, Firmware wartet, Warnungen – jede Minute */
+(function () {
+    var strip = document.getElementById('issueStrip');
+    var esc = ui.esc, shown = null;
+    function render(items) {
+        var html = items.slice(0, 6).map(function (i) {
+            var tag = i.href ? 'a' : 'div';
+            return '<' + tag + ' class="issue ' + esc(i.level) + '"' + (i.href ? ' href="' + esc(i.href) + '"' : '') + '>'
+                + '<span class="dot" aria-hidden="true"></span><span class="text">' + esc(i.text) + '</span></' + tag + '>';
+        }).join('') + (items.length > 6 ? '<div class="issue"><span class="dot" aria-hidden="true"></span><span class="text">und ' + (items.length - 6) + ' weitere</span></div>' : '');
+        // Nur bei Änderung neu schreiben: sonst liest ein Screenreader jede Minute dasselbe vor
+        if (html === shown) return;
+        shown = html;
+        strip.innerHTML = html;
+        strip.hidden = !items.length;
+    }
+    async function load() {
+        try { render((await ui.json('/api/issues')).issues || []); }
+        catch (e) {
+            render([{ level: 'danger', href: '', text: 'Server nicht erreichbar – was diese Seite zeigt, ist womöglich nicht aktuell.' }]);
+            throw e;
+        }
+    }
+    ui.poll(load, 60000)();
+})();
+</script>
 <script>
 (function () {
     var html = document.documentElement;

@@ -26,7 +26,7 @@ from dotenv import dotenv_values
 from PIL import ImageFont
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 # ---------------------------------------------------------------------------
 # Verzeichnisse
@@ -813,6 +813,16 @@ def _write_env_settings_locked(updates: dict[str, str]) -> None:
         new_lines.append(f"{key}={format_env_value(value)}")
 
     content = "\n".join(new_lines).rstrip() + "\n"
+    # Den bisherigen Stand sichern, bevor er sich ändert (System-Seite: „Frühere Stände“).
+    # Ein Fehler dabei darf das Speichern nicht verhindern.
+    old_content = "\n".join(lines).rstrip() + "\n" if lines else ""
+    if old_content and old_content != content:
+        try:
+            from app.settings_backup import backup_text
+            backup_text(ENV_FILE_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            from app.logger import get_logger as _gl
+            _gl(__name__).warning(f"Einstellungen: Sicherung des bisherigen Stands fehlgeschlagen: {exc}")
     # Eigener Temp-Name je Aufruf: ein fester Name ließe zwei Schreiber dieselbe Datei tauschen
     fd, tmp_name = tempfile.mkstemp(prefix=f".{ENV_FILE_PATH.name}.", suffix=".tmp", dir=ENV_FILE_PATH.parent)
     try:

@@ -44,6 +44,8 @@ Supported output modes:
 - **Gallery** – local image folders as an idle module with random selection, blur background, and optional overlay
 - **Modular architecture** – add new content sources as standalone modules without touching the core framework
 - **E-Ink, dark and light themes** – flat Spectra 6 colours for the E-Ink panel (the default), dark and light for regular screens
+- **Status strip** – every page shows what needs attention right now: the display has gone silent or reports an error, a content source is down, a firmware update is waiting, a warning is active; each line links to the page that helps
+- **Settings history** – before every change the previous `settings.env` is kept (the last 30); the *System* page lists them with the settings that changed since and brings one back with a click
 - **Web UI** – four pages that follow the user's questions: *Anzeige* (what the display shows, with the programme, switches, order and previews), *Inhalte* (one card per source with its own save button and a connection test), *Gerät* (display and ESP32 status), *System* (events, time zone, backup and restore)
 - **Docker-ready** – container startup via `Dockerfile` and `docker-compose.yml`
 - **WSGI-ready** – production container startup through Gunicorn with a clean runtime bootstrap
@@ -144,7 +146,7 @@ The web UI is then available at `http://localhost:8787`. To build the image your
 
 Persistent directories (the only places the server writes to; the program code in the image is read-only for it):
 
-- `./config` – runtime configuration file (`settings.env`, created by the web UI; `config/settings.env.example` shows every key)
+- `./config` – runtime configuration file (`settings.env`, created by the web UI; `config/settings.env.example` shows every key) and `backups/` with its previous states
 - `./data/output` – rendered images, render history, caches, hosted firmware
 - `./logs` – JSON logs
 
@@ -181,6 +183,7 @@ For local development, `python app/server.py` remains the simplest path. In Dock
 - The firmware binary contains your Wi-Fi password in plain text, and `/ack` accepts reports from anyone who can reach the server. Set `INKWALL_DEVICE_TOKEN` (container environment) and the same value as `DEVICE_TOKEN` in `esp32/Inkwall/config.private.h` (firmware 1.3.1 or newer): `/firmware.bin`, `/firmware.json` and `/ack` then need the token (header `X-Inkwall-Token`) or the UI password. **Order matters:** first install the firmware with the token, then set the token on the server – otherwise the device can no longer report back or update. Images and `/meta.json` stay open.
 - Writing requests (save, upload, delete, test buttons) coming from another website are refused (`Sec-Fetch-Site` / `Origin`): browsers send stored Basic Auth credentials along, so without this check any page opened in your network could, for example, upload a firmware that the display installs on its next wake. Requests without these headers (the ESP32, curl, the Plex webhook) are not affected.
 - Uploads are limited to 4 MB.
+- The previous states in `config/backups/` contain the same secrets as `settings.env` and get its file permissions. The web UI lists only which settings changed, never their values.
 - "Einstellungen sichern" without secrets leaves out passwords, API keys, the notification address (webhook tokens, ntfy topics) and the calendar and garbage collection links.
 - The Gallery module reads image folders from the server's file system, and the folder list is editable in the web UI. Set `INKWALL_GALLERY_ROOTS` (container environment, e.g. `/gallery`; several roots separated by `;`) to restrict gallery folders to those roots: folders outside are rejected on save, skipped when scanning, and symlinks that lead out of the roots are ignored. Unset, any folder is allowed (home network default).
 - Secrets such as the Plex token or the Steam API key are never written into the settings page HTML. The field shows as empty; leaving it empty on save keeps the stored value.
@@ -307,6 +310,9 @@ When settings are changed through the web UI, the application writes them back t
 | `/api/settings/<module_id>` | GET, PUT | Fields of one module card (`framework` for device and system fields) with current values; PUT validates and returns errors per field. Passwords are never returned, an empty password keeps the stored one |
 | `/api/probe/<module_id>` | POST | Fetch the module's source once and report the result in one sentence; with `{"values": {…}}` it tests unsaved form values (only for this request) |
 | `/api/logs?events=1` | GET | Only events (content switched, device reported, settings saved, source unreachable) instead of every render line |
+| `/api/issues` | GET | What needs attention (status strip): `[{"level": "danger" \| "warn" \| "info", "text", "href"}]`, empty when all is well; answered from the cache |
+| `/api/settings/backups` | GET | Previous states of `settings.env`, newest first, with the settings that differ from now (names and labels, no values) |
+| `/api/settings/backups/<id>/restore` | POST | Bring a previous state back; the current one is kept first |
 
 ---
 
@@ -327,6 +333,7 @@ Inkwall/
 │   ├── epd_format.py           # Compact 4-bit panel format (/current.epd)
 │   ├── ics.py                  # ICS parsing for Kalender and Müllabfuhr (recurrences, time zones)
 │   ├── holidays.py             # Public and school holidays per federal state (openholidaysapi.org)
+│   ├── settings_backup.py      # Previous states of settings.env (kept on every change, restore)
 │   ├── logger.py               # JSONL + console logging with secret masking
 │   ├── module_base.py          # InkwallModule base class for all modules
 │   ├── module_registry.py      # Module auto-discovery and hot reload

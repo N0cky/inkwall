@@ -1610,6 +1610,63 @@ def api_settings_import():
     return jsonify({"ok": True, "applied": len(updates), "ignored": ignored})
 
 
+@app.route("/api/settings/backups", methods=["GET"])
+def api_settings_backups():
+    """Frühere Stände von settings.env – mit den Werten, die sich seitdem geändert haben (nur Namen, keine Werte)."""
+    from app import settings_backup as sb
+    from app.config import read_env_settings
+    from app.display_api import field_labels
+    current = read_env_settings()
+    labels = field_labels()
+    items = []
+    for path in sb.list_backups():
+        try:
+            values = sb.read_values(path)
+            size = path.stat().st_size
+        except Exception as exc:
+            log.warning(f"Frühere Stände: {path.name} nicht lesbar: {exc}")
+            continue
+        when = sb.created_at(path)
+        items.append({
+            "id": path.name,
+            "created_at": when.isoformat() if when else "",
+            "size": size,
+            "changed": [{"key": k, "label": labels.get(k, k)} for k in sb.changed_keys(values, current)],
+        })
+    return jsonify({"backups": items, "keep": sb.KEEP})
+
+
+@app.route("/api/settings/backups/<name>/restore", methods=["POST"])
+def api_settings_backup_restore(name: str):
+    """Einen früheren Stand zurückholen; der jetzige wird vorher gesichert."""
+    from app import settings_backup as sb
+    from app.config import read_env_settings
+    path = sb.find(name)
+    if path is None:
+        return jsonify({"ok": False, "error": "Diesen Stand gibt es nicht."}), 404
+    with settings_lock:
+        sb.restore(path)
+        apply_runtime_config(read_env_settings())
+    _refresh_log_secrets()
+    when = sb.created_at(path)
+    log_event("settings", f"Einstellungen vom {when:%d.%m. %H:%M} zurückgeholt" if when else "Früheren Stand der Einstellungen zurückgeholt")
+    request_render(reason="Einstellungen zurückgeholt")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/issues", methods=["GET"])
+def api_issues():
+    """Statusleiste jeder Seite: Gerät still, Quelle gestört, Firmware wartet, Warnungen – nur aus dem Cache."""
+    from app.display_api import build_issues
+    from app.http_client import cache_only
+    env = get_settings_values()
+    expected = _suggest_next_wake(_esp32_state.get("state", "idle"), _esp32_state.get("media_type", "idle"))[0]
+    with cache_only():
+        issues = build_issues(_esp32_state, _last_ack, expected, _worker_health(),
+                              stale_sources=_stale_sources(env), alerts=_active_alerts(env))
+    return jsonify({"issues": issues})
+
+
 @app.route("/refresh", methods=["GET", "POST"])
 def refresh():
     completed = request_render(wait_seconds=20, reason="/refresh")

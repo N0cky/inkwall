@@ -12,6 +12,7 @@ tests
 logs
 data/output
 config/*.env
+config/backups
 bin
 dotenv
 python_dotenv-*.dist-info

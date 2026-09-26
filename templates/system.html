@@ -29,6 +29,10 @@
 .maint-row b { display: block; font-size: 13.5px; }
 .maint-row .hint { margin-top: 2px; }
 .kv { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 6px 0; }
+.backups { max-height: 420px; overflow: auto; }
+.backup-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--border); }
+.backup-row:first-child { border-top: 0; }
+.backup-row b { font-size: 13.5px; }
 .kv .k { color: var(--muted); }
 @media (max-width: 980px) { .two { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .ev { grid-template-columns: 1fr; gap: 2px; } }
@@ -87,6 +91,12 @@
             </div>
         </div></div>
     </div>
+
+    <div class="card"><div class="card-body">
+        <div class="card-title">Frühere Stände der Einstellungen</div>
+        <div class="hint" style="margin-bottom:10px">Vor jeder Änderung legt Inkwall den bisherigen Stand von <span class="mono">settings.env</span> ab – die letzten <span id="backupKeep">30</span>, im Ordner <span class="mono">backups</span> neben der Datei. Zurückholen sichert vorher den jetzigen Stand, lässt sich also wieder rückgängig machen.</div>
+        <div id="backups"><div class="hint">Wird geladen …</div></div>
+    </div></div>
 </div>
 {% endblock %}
 
@@ -161,6 +171,7 @@
                 await ui.json('/api/settings/framework', { method: 'PUT', body: { values: fields.collect(form) } });
                 fields.clearErrors(form);
                 ui.toast('Gespeichert', 'ok');
+                loadBackups();
             } catch (e) {
                 fields.banner(banner, fields.showErrors(form, e.data && e.data.errors));
                 throw e;
@@ -186,7 +197,7 @@
             var payload = JSON.parse(await file.text());
             var r = await ui.json('/api/settings/import', { method: 'POST', body: payload });
             ui.toast('Wiederhergestellt: ' + r.applied + ' Werte' + (r.ignored.length ? ', ' + r.ignored.length + ' unbekannte übersprungen' : ''), 'ok', 5000);
-            loadForm();
+            loadForm(); loadBackups();
         } catch (e) { ui.toast('Import fehlgeschlagen: ' + e.message, 'error', 5000); }
         this.value = '';
     });
@@ -201,7 +212,35 @@
         $('authChip').textContent = h.ui_password ? 'aktiv' : 'offen'; $('authChip').className = 'chip ' + (h.ui_password ? 'ok' : 'warn');
     }).catch(function () {});
 
-    loadLogs(); schedule(); loadForm();
+    /* ── Frühere Stände ── */
+    async function loadBackups() {
+        var box = $('backups');
+        try {
+            var data = await ui.json('/api/settings/backups');
+            $('backupKeep').textContent = data.keep;
+            if (!data.backups.length) { box.innerHTML = '<div class="hint">Noch keine – der erste Stand entsteht beim nächsten Speichern.</div>'; return; }
+            box.innerHTML = '<div class="backups">' + data.backups.map(function (b) {
+                var n = b.changed.length;
+                var diff = n ? n + (n > 1 ? ' Werte' : ' Wert') + ' anders als jetzt: ' + b.changed.slice(0, 6).map(function (c) { return c.label; }).join(', ') + (n > 6 ? ' …' : '')
+                             : 'gleich wie jetzt';
+                return '<div class="backup-row"><div><b>' + esc(ui.fmtDateTime(b.created_at)) + '</b><div class="hint">' + esc(diff) + '</div></div>'
+                    + '<button class="btn small" type="button" data-restore="' + esc(b.id) + '"' + (n ? '' : ' disabled') + '>Zurückholen</button></div>';
+            }).join('') + '</div>';
+            box.querySelectorAll('[data-restore]').forEach(function (btn) { btn.addEventListener('click', restoreBackup); });
+        } catch (e) { box.innerHTML = '<div class="hint">Nicht ladbar: ' + esc(e.message) + '</div>'; }
+    }
+    async function restoreBackup() {
+        var btn = this, when = btn.closest('.backup-row').querySelector('b').textContent;
+        if (!window.confirm('Einstellungen vom ' + when + ' zurückholen? Der jetzige Stand wird vorher gesichert.')) return;
+        btn.disabled = true;
+        try {
+            await ui.json('/api/settings/backups/' + encodeURIComponent(btn.getAttribute('data-restore')) + '/restore', { method: 'POST' });
+            ui.toast('Einstellungen vom ' + when + ' zurückgeholt.', 'ok', 5000);
+            loadForm(); loadBackups();
+        } catch (e) { ui.toast('Nicht zurückgeholt: ' + e.message, 'error', 6000); btn.disabled = false; }
+    }
+
+    loadLogs(); schedule(); loadForm(); loadBackups();
 })();
 </script>
 {% endblock %}
