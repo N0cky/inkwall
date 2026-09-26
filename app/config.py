@@ -26,7 +26,7 @@ from dotenv import dotenv_values
 from PIL import ImageFont
 
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 
 # ---------------------------------------------------------------------------
 # Verzeichnisse
@@ -68,6 +68,8 @@ CURRENT_IMAGE_PATH = DATA_DIR / "current.png"
 CURRENT_BMP_PATH   = DATA_DIR / "current.bmp"
 CURRENT_EPD_PATH   = DATA_DIR / "current.epd"    # kompaktes 4-bpp-Format für den ESP32
 STATE_PATH         = DATA_DIR / "state.txt"
+# Hash des Bilds ohne „Stand HH:MM“-Stempel – überlebt den Neustart, sonst zeichnet das Panel danach einmal umsonst neu
+CONTENT_HASH_PATH  = DATA_DIR / "content_hash.txt"
 
 
 # ---------------------------------------------------------------------------

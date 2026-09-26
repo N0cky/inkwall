@@ -62,6 +62,7 @@ def _paths(tmp: Path) -> dict:
         "CURRENT_BMP_PATH":   tmp / "current.bmp",
         "CURRENT_EPD_PATH":   tmp / "current.epd",
         "STATE_PATH":         tmp / "state.txt",
+        "CONTENT_HASH_PATH":  tmp / "content_hash.txt",
     }
 
 
@@ -155,6 +156,31 @@ class SaveImageTest(_PipelineTestBase):
             with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 10, 9, tzinfo=berlin)):
                 server._save_image(Image.new("RGB", (600, 800), (200, 30, 30)), "fake:c", "fake")
             self.assertNotEqual(server._esp32_state["hash"], first_hash, "anderer Inhalt: neues Bild")
+
+    def test_stamp_comparison_survives_a_restart(self) -> None:
+        """Nach dem Neustart des Containers: gleicher Inhalt, andere Uhrzeit → kein neues Bild fürs Gerät."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        class _Stamped(_FakeCfg):
+            show_render_time = True
+
+        berlin = ZoneInfo("Europe/Berlin")
+        img = Image.new("RGB", (600, 800), (30, 30, 30))
+        with patch.object(server, "get_cfg", return_value=_Stamped()):
+            with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 8, 55, tzinfo=berlin)):
+                server._save_image(img, "fake:a", "fake")
+            before = server._esp32_state["hash"]
+            png = (self.tmp / "current.png").read_bytes()
+            # Neustart: Zustand weg, von der Platte übernehmen
+            server._esp32_state = {}
+            with patch.object(server._registry, "get_module_by_id", return_value=object()):
+                server._restore_render_state()
+            self.assertEqual(server._esp32_state["hash"], before)
+            with patch.object(server, "_get_local_now", return_value=_dt(2026, 9, 26, 8, 57, tzinfo=berlin)):
+                server._save_image(img.copy(), "fake:a", "fake")
+        self.assertEqual(server._esp32_state["hash"], before, "nach dem Neustart kein neues Bild")
+        self.assertEqual((self.tmp / "current.png").read_bytes(), png)
 
     def test_writes_png_atomically_and_hashes_bytes(self) -> None:
         img = Image.new("RGB", (4, 4), (0, 255, 0))

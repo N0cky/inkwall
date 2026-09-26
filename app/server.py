@@ -43,6 +43,7 @@ from app.config import (
     CURRENT_BMP_PATH,
     CURRENT_EPD_PATH,
     STATE_PATH,
+    CONTENT_HASH_PATH,
     SETTINGS_FIELDS        as FRAMEWORK_SETTINGS_FIELDS,
     SETTINGS_GROUPS        as FRAMEWORK_SETTINGS_GROUPS,
     apply_runtime_config,
@@ -606,6 +607,8 @@ def _save_image(image: Image.Image, state_key: str, module_id: str) -> None:
     if not unchanged:
         for path, data in files:
             _atomic_write_bytes(path, data)
+        # Vergleichswert ohne Stempel mit ablegen (leer ohne Stempel), damit er einen Neustart überlebt
+        _atomic_write_bytes(CONTENT_HASH_PATH, content_hash.encode("utf-8"))
 
     _atomic_write_bytes(STATE_PATH, state_key.encode("utf-8"))
 
@@ -2048,12 +2051,18 @@ def _restore_render_state() -> None:
             media_type = "none"
         elif media_type != "dashboard" and _registry.get_module_by_id(media_type) is None:
             media_type = "idle"
+        try:
+            content_hash = CONTENT_HASH_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            content_hash = ""
         _esp32_state = {
             "hash":        image_hash,
             "format":      cfg.output_format,
             "state":       state_key or "idle",
             "media_type":  media_type or "idle",
             "rendered_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Mit „Uhrzeit auf jeder Seite“: gleicher Inhalt nach dem Neustart = kein neues Bild
+            "content_hash": content_hash,
         }
         log.info(f"Letztes Bild übernommen: {media_type or 'idle'}, hash={image_hash[:8]}…")
     except Exception as exc:

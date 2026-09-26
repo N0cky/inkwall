@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-26
+
+### Fixed
+
+- "Uhrzeit auf jeder Seite" (`SHOW_RENDER_TIME`): after every restart of the server (for example a container update) the panel redrew once although nothing had changed – the comparison without the stamp only lived in memory. It is now kept next to the image (`content_hash.txt`) and taken over on start
+
 ## [0.6.0] - 2026-09-26
 
 ### Added
