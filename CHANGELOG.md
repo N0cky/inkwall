@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and is adapted for the first public rele
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-21
+
+### Security
+
+- Pillow 13.0.0 (was 12.3.0): fixes a heap buffer overflow in the JPEG decoder, out-of-bounds reads in the TIFF decoder and several decompression bomb bypasses. None of the removed Pillow APIs is used here
+- certifi 2026.10.19: drops the emSign root certificates whose intermediate CA keys were compromised
+- Werkzeug 3.1.9: `safe_join()` rejects Windows device names (only matters on Windows, the image runs on Linux)
+
 ## [0.8.0] - 2026-09-26
 
 ### Added
